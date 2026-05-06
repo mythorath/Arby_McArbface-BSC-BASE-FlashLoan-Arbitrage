@@ -811,6 +811,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "arb-discovery"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-rpc-types",
+ "alloy-transport-ws",
+ "anyhow",
+ "arb-core",
+ "chrono",
+ "futures",
+ "hex",
+ "parking_lot",
+ "rand 0.8.6",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "arb-mempool"
 version = "0.1.0"
 dependencies = [
@@ -878,6 +904,7 @@ dependencies = [
  "alloy-transport-ws",
  "anyhow",
  "arb-core",
+ "arb-discovery",
  "arb-mempool",
  "arb-paths",
  "arb-rpc",

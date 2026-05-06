@@ -59,8 +59,25 @@ pub fn path_max_flash(
             Some(PoolState::Dodo(s)) => {
                 if hop.token_in == s.base_token { s.base_reserve } else { s.quote_reserve }
             }
-            // V3/Curve/Wombat: use liquidity as a rough proxy, but don't restrict
-            _ => continue,
+            Some(PoolState::V3(s)) => {
+                if s.sqrt_price_x96.is_zero() || s.liquidity == 0 {
+                    return U256::ZERO;
+                }
+                let l = U256::from(s.liquidity);
+                let q96 = U256::from(1u128 << 96);
+                if hop.token_in == s.token0 {
+                    // reserve0 ≈ L * Q96 / sqrtPrice
+                    l.checked_mul(q96)
+                        .and_then(|v| v.checked_div(s.sqrt_price_x96))
+                        .unwrap_or(U256::MAX)
+                } else {
+                    // reserve1 ≈ L * sqrtPrice / Q96
+                    l.checked_mul(s.sqrt_price_x96)
+                        .and_then(|v| v.checked_div(q96))
+                        .unwrap_or(U256::MAX)
+                }
+            }
+            Some(PoolState::Curve(_)) | Some(PoolState::Wombat(_)) | None => continue,
         };
 
         if reserve_in.is_zero() {

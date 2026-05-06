@@ -26,8 +26,6 @@ fn read_addr(data: &[u8], word: usize) -> Option<Address> {
     Some(Address::from_slice(&data[start..start + 20]))
 }
 
-/// Decode V2-style `swapExactTokensForTokens(amountIn, amountOutMin, path[], to, deadline)`.
-/// The `path` array is at dynamic offset word 2. Extract token_in, token_out, amount_in.
 fn decode_v2_swap(data: &[u8]) -> Option<(Address, Address, U256)> {
     if data.len() < 5 * 32 { return None; }
     let amount_in = read_u256(data, 0)?;
@@ -40,10 +38,8 @@ fn decode_v2_swap(data: &[u8]) -> Option<(Address, Address, U256)> {
     Some((token_in, token_out, amount_in))
 }
 
-/// Decode V3 `exactInputSingle((tokenIn, tokenOut, fee, recipient, amountIn, amountOutMin, sqrtPriceLimitX96))`.
 fn decode_v3_exact_input_single(data: &[u8]) -> Option<(Address, Address, U256)> {
     if data.len() < 7 * 32 { return None; }
-    // The params are a struct packed as sequential words (via tuple offset)
     let offset: usize = read_u256(data, 0)?.try_into().ok()?;
     let base = offset / 32;
     let token_in = read_addr(data, base)?;
@@ -52,19 +48,123 @@ fn decode_v3_exact_input_single(data: &[u8]) -> Option<(Address, Address, U256)>
     Some((token_in, token_out, amount_in))
 }
 
+/// Decode Universal Router `execute(bytes commands, bytes[] inputs, uint256 deadline)`.
+/// We look at the first command byte; 0x00 = V3_SWAP_EXACT_IN, 0x08 = V2_SWAP_EXACT_IN.
+fn decode_universal_router(data: &[u8]) -> Option<(Address, Address, U256)> {
+    if data.len() < 4 * 32 { return None; }
+
+    let commands_offset: usize = read_u256(data, 0)?.try_into().ok()?;
+    let inputs_offset: usize = read_u256(data, 1)?.try_into().ok()?;
+
+    let cmd_len_offset = commands_offset / 32;
+    let cmd_len: usize = read_u256(data, cmd_len_offset)?.try_into().ok()?;
+    if cmd_len == 0 { return None; }
+
+    let cmd_data_start = commands_offset + 32;
+    if data.len() < cmd_data_start + cmd_len { return None; }
+    let first_cmd = data[cmd_data_start] & 0x1f;
+
+    let inputs_len_offset = inputs_offset / 32;
+    let inputs_len: usize = read_u256(data, inputs_len_offset)?.try_into().ok()?;
+    if inputs_len == 0 { return None; }
+
+    let first_input_ptr_offset = inputs_offset + 32;
+    if data.len() < first_input_ptr_offset + 32 { return None; }
+    let first_input_rel: usize = U256::from_be_slice(
+        &data[first_input_ptr_offset..first_input_ptr_offset + 32]
+    ).try_into().ok()?;
+    let first_input_abs = inputs_offset + 32 + first_input_rel;
+
+    let input_len_offset = first_input_abs;
+    if data.len() < input_len_offset + 32 { return None; }
+    let input_len: usize = U256::from_be_slice(
+        &data[input_len_offset..input_len_offset + 32]
+    ).try_into().ok()?;
+    let input_data_start = input_len_offset + 32;
+    if data.len() < input_data_start + input_len { return None; }
+    let input_data = &data[input_data_start..input_data_start + input_len];
+
+    match first_cmd {
+        0x00 => {
+            // V3_SWAP_EXACT_IN: (address recipient, uint256 amountIn, uint256 amountOutMin, bytes path, bool payerIsUser)
+            if input_data.len() < 4 * 32 { return None; }
+            let amount_in = read_u256(input_data, 1)?;
+            let path_offset: usize = read_u256(input_data, 3)?.try_into().ok()?;
+            let path_len_off = path_offset / 32;
+            let path_len: usize = read_u256(input_data, path_len_off)?.try_into().ok()?;
+            if path_len < 43 { return None; } // min: 20 + 3 + 20
+            let path_start = path_offset + 32;
+            if input_data.len() < path_start + path_len { return None; }
+            let path_bytes = &input_data[path_start..path_start + path_len];
+            let token_in = Address::from_slice(&path_bytes[..20]);
+            let token_out = Address::from_slice(&path_bytes[path_len - 20..]);
+            Some((token_in, token_out, amount_in))
+        }
+        0x08 => {
+            // V2_SWAP_EXACT_IN: (address recipient, uint256 amountIn, uint256 amountOutMin, address[] path, bool payerIsUser)
+            if input_data.len() < 4 * 32 { return None; }
+            let amount_in = read_u256(input_data, 1)?;
+            let path_offset: usize = read_u256(input_data, 3)?.try_into().ok()?;
+            let path_len_off = path_offset / 32;
+            let path_len: usize = read_u256(input_data, path_len_off)?.try_into().ok()?;
+            if path_len < 2 { return None; }
+            let token_in = read_addr(input_data, path_len_off + 1)?;
+            let token_out = read_addr(input_data, path_len_off + path_len)?;
+            Some((token_in, token_out, amount_in))
+        }
+        _ => None,
+    }
+}
+
+/// Decode 1inch/OpenOcean style swap with SwapDescription struct.
+/// Layout: (address executor/caller, (address srcToken, address dstToken, address srcReceiver,
+///          address dstReceiver, uint256 amount, ...) desc, bytes permit/data, bytes data)
+fn decode_swap_description(data: &[u8]) -> Option<(Address, Address, U256)> {
+    if data.len() < 7 * 32 { return None; }
+    let desc_offset: usize = read_u256(data, 1)?.try_into().ok()?;
+    let base = desc_offset / 32;
+    let src_token = read_addr(data, base)?;
+    let dst_token = read_addr(data, base + 1)?;
+    let amount = read_u256(data, base + 4)?;
+    Some((src_token, dst_token, amount))
+}
+
+/// Decode 1inch unoswapTo: (address to, address srcToken, uint256 amount, uint256 minReturn, uint256[] pools)
+fn decode_unoswap(data: &[u8]) -> Option<(Address, Address, U256)> {
+    if data.len() < 5 * 32 { return None; }
+    let src_token = read_addr(data, 1)?;
+    let amount = read_u256(data, 2)?;
+    Some((src_token, Address::ZERO, amount))
+}
+
 impl TxDecoder {
     pub fn new() -> Self {
         Self {
             known_selectors: vec![
+                // V2-style routers
                 ([0x38, 0xed, 0x17, 0x39], "UniV2_swapExactTokensForTokens"),
                 ([0x7f, 0xf3, 0x6a, 0xb5], "UniV2_swapExactETHForTokens"),
                 ([0x18, 0xcb, 0xaf, 0xe5], "UniV2_swapExactTokensForETH"),
+                ([0x62, 0x58, 0xf5, 0xf0], "Aero_swapExactTokensForTokens"),
+                // V3 routers
                 ([0x41, 0x4b, 0xf3, 0x89], "UniV3_exactInputSingle"),
                 ([0xb8, 0x58, 0x18, 0x3f], "UniV3_exactInput"),
+                // Universal Router
                 ([0x35, 0x93, 0x56, 0x4c], "UniversalRouter_execute"),
+                ([0x3f, 0x62, 0x19, 0x2f], "UniversalRouter_execute_deadline"),
+                // PancakeSwap SmartRouter
                 ([0x5c, 0x11, 0xd7, 0x95], "PCS_swap"),
+                // 1inch v5/v6
                 ([0x12, 0xaa, 0x3c, 0xaf], "1inch_swap"),
-                ([0x62, 0x58, 0xf5, 0xf0], "Aero_swapExactTokensForTokens"),
+                ([0xf7, 0x8d, 0xc2, 0x53], "1inch_unoswapTo"),
+                ([0xe2, 0xc9, 0x51, 0x59], "1inch_unoswap"),
+                ([0x07, 0xed, 0x23, 0x79], "1inch_v6_swap"),
+                // KyberSwap
+                ([0xe2, 0x1f, 0xd0, 0xe9], "KyberSwap_swap"),
+                // OpenOcean
+                ([0x90, 0x41, 0x1a, 0x32], "OpenOcean_swap"),
+                // OKX DEX
+                ([0x36, 0xb1, 0xa1, 0xbc], "OKX_swap"),
             ],
         }
     }
@@ -92,6 +192,18 @@ impl TxDecoder {
             }
             "UniV3_exactInputSingle" => {
                 decode_v3_exact_input_single(data).map(|(a, b, c)| (Some(a), Some(b), Some(c))).unwrap_or_default()
+            }
+            "UniversalRouter_execute" | "UniversalRouter_execute_deadline" => {
+                decode_universal_router(data).map(|(a, b, c)| (Some(a), Some(b), Some(c))).unwrap_or_default()
+            }
+            "1inch_swap" | "1inch_v6_swap" | "OpenOcean_swap" | "OKX_swap" | "KyberSwap_swap" => {
+                decode_swap_description(data).map(|(a, b, c)| (Some(a), Some(b), Some(c))).unwrap_or_default()
+            }
+            "1inch_unoswapTo" | "1inch_unoswap" => {
+                decode_unoswap(data).map(|(a, b, c)| {
+                    let out = if b == Address::ZERO { None } else { Some(b) };
+                    (Some(a), out, Some(c))
+                }).unwrap_or_default()
             }
             _ => (None, None, None),
         };

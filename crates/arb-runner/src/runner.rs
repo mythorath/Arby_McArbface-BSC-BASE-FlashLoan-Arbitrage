@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,8 +10,10 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+use arb_discovery::store::DiscoveryStore;
 use arb_mempool::MempoolWatcher;
 use arb_paths::enumerate::{PathEnumerator, PoolInfo};
+use arb_paths::PathTemplate;
 use arb_rpc::Endpoint;
 use arb_sim::evaluate::evaluate_all;
 use arb_sim::gate::ProfitGate;
@@ -124,6 +126,103 @@ impl PathCircuitBreaker {
         entries.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
         entries.truncate(10);
         entries
+    }
+}
+
+struct TokenCircuitBreaker {
+    stats: HashMap<Address, TokenBreakerStats>,
+    revert_threshold: u32,
+    suppression_blocks: u64,
+    blacklist: HashSet<Address>,
+}
+
+struct TokenBreakerStats {
+    consecutive_reverts: u32,
+    last_revert_block: u64,
+    suppressed_until_block: u64,
+}
+
+impl TokenCircuitBreaker {
+    fn new(revert_threshold: u32, suppression_blocks: u64) -> Self {
+        Self {
+            stats: HashMap::new(),
+            revert_threshold,
+            suppression_blocks,
+            blacklist: HashSet::new(),
+        }
+    }
+
+    fn load_blacklist(&mut self, path: &std::path::Path) {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            if let Ok(bl) = serde_json::from_str::<serde_json::Value>(&contents) {
+                if let Some(addrs) = bl.get("addresses").and_then(|a| a.as_array()) {
+                    for entry in addrs {
+                        if let Some(addr_str) = entry.get("address").and_then(|a| a.as_str()) {
+                            if let Ok(addr) = addr_str.parse::<Address>() {
+                                self.blacklist.insert(addr);
+                            }
+                        }
+                    }
+                }
+                info!(count = self.blacklist.len(), "Loaded token blacklist");
+            }
+        }
+    }
+
+    fn is_token_suppressed(&self, token: Address, current_block: u64) -> bool {
+        if self.blacklist.contains(&token) {
+            return true;
+        }
+        if let Some(s) = self.stats.get(&token) {
+            current_block < s.suppressed_until_block
+        } else {
+            false
+        }
+    }
+
+    fn is_path_token_suppressed(&self, path: &PathTemplate, current_block: u64) -> bool {
+        path.hops.iter().any(|hop| {
+            self.is_token_suppressed(hop.token_in, current_block)
+                || self.is_token_suppressed(hop.token_out, current_block)
+        })
+    }
+
+    fn record_revert_for_path(&mut self, path: &PathTemplate, block: u64) {
+        for hop in &path.hops {
+            for &token in &[hop.token_in, hop.token_out] {
+                let s = self.stats.entry(token).or_insert(TokenBreakerStats {
+                    consecutive_reverts: 0,
+                    last_revert_block: 0,
+                    suppressed_until_block: 0,
+                });
+                if block > s.last_revert_block + 200 {
+                    s.consecutive_reverts = 0;
+                }
+                s.consecutive_reverts += 1;
+                s.last_revert_block = block;
+                if s.consecutive_reverts >= self.revert_threshold {
+                    s.suppressed_until_block = block + self.suppression_blocks;
+                    warn!(token = %token, until_block = s.suppressed_until_block,
+                        "Token circuit-breaker tripped");
+                }
+            }
+        }
+    }
+
+    fn record_success_for_path(&mut self, path: &PathTemplate) {
+        for hop in &path.hops {
+            for &token in &[hop.token_in, hop.token_out] {
+                if let Some(s) = self.stats.get_mut(&token) {
+                    s.consecutive_reverts = 0;
+                    s.suppressed_until_block = 0;
+                }
+            }
+        }
+    }
+
+    fn suppressed_token_count(&self, current_block: u64) -> usize {
+        self.blacklist.len()
+            + self.stats.values().filter(|s| current_block < s.suppressed_until_block).count()
     }
 }
 
@@ -251,7 +350,7 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
         .filter_map(|(name, &price)| tokens.get(name).map(|&addr| (addr, price)))
         .collect();
 
-    let pool_configs: Vec<PoolConfig> = cfg
+    let mut pool_configs: Vec<PoolConfig> = cfg
         .pools
         .iter()
         .map(|p| PoolConfig {
@@ -261,7 +360,7 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
         })
         .collect();
 
-    let pool_infos: Vec<PoolInfo> = cfg
+    let mut pool_infos: Vec<PoolInfo> = cfg
         .pools
         .iter()
         .map(|p| PoolInfo {
@@ -271,6 +370,88 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
             token1: tokens[&p.token1],
         })
         .collect();
+
+    let mut token_usd_prices = token_usd_prices;
+    let mut token_decimals: HashMap<Address, u32> = HashMap::new();
+
+    // Populate decimals for known tokens from config
+    for (name, &addr) in &tokens {
+        let dec = match name.as_str() {
+            "USDT" | "USDC" | "USDbC" | "BUSD" => 6,
+            _ => 18,
+        };
+        token_decimals.insert(addr, dec);
+    }
+
+    // Merge discovered pools/tokens from arb-discovery JSON files
+    let discovery_store = DiscoveryStore::new(std::path::Path::new("discovery"));
+    let chain_lower = chain_name.to_lowercase();
+    let toml_pool_addrs: HashSet<Address> = pool_configs.iter().map(|p| p.address).collect();
+
+    if let Ok(pool_universe) = discovery_store.load_pools(&chain_lower) {
+        let mut merged = 0u32;
+        for dp in &pool_universe.pools {
+            let addr: Address = match dp.address.parse() {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            if toml_pool_addrs.contains(&addr) {
+                continue;
+            }
+            let t0: Address = match dp.token0.parse() {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            let t1: Address = match dp.token1.parse() {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            let protocol = crate::config::PoolEntry {
+                name: format!("DISC_{}", dp.exchange_name.replace(' ', "_")),
+                address: dp.address.clone(),
+                protocol: dp.protocol.clone(),
+                token0: dp.token0.clone(),
+                token1: dp.token1.clone(),
+                fee_bps: dp.fee_bps,
+            }
+            .parse_protocol();
+
+            pool_configs.push(PoolConfig {
+                address: addr,
+                protocol,
+                fee_bps: dp.fee_bps,
+            });
+            pool_infos.push(PoolInfo {
+                address: addr,
+                protocol,
+                token0: t0,
+                token1: t1,
+            });
+            merged += 1;
+        }
+        if merged > 0 {
+            info!(merged, total = pool_infos.len(), "Merged discovered pools");
+        }
+    }
+
+    if let Ok(token_universe) = discovery_store.load_tokens(&chain_lower) {
+        let mut price_merged = 0u32;
+        for dt in &token_universe.tokens {
+            let addr: Address = match dt.address.parse() {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            // Only set price if not already known from TOML
+            if !token_usd_prices.contains_key(&addr) && dt.price_usd > 0.0 {
+                token_usd_prices.insert(addr, dt.price_usd);
+                price_merged += 1;
+            }
+            token_decimals.insert(addr, dt.decimals);
+        }
+        if price_merged > 0 {
+            info!(price_merged, "Merged discovered token prices");
+        }
+    }
 
     let store = Arc::new(PoolStore::new());
     let state_reader: Address = cfg.chain.state_reader.parse()?;
@@ -342,11 +523,12 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
     info!(always_on, high_ev, total = submitters.len(), "Submission layer initialized");
 
     let profit_gate = if smoke_test {
-        ProfitGate::new(0, 0.0, 0, 0, token_usd_prices)
+        ProfitGate::new(0, 0.0, 0, 0, token_usd_prices.clone(), token_decimals.clone())
     } else {
         ProfitGate::new(
             cfg.scanner.min_profit_bps, cfg.gate.min_profit_usd,
             cfg.gate.safety_margin_bps, cfg.gate.stable_pool_extra_margin_bps, token_usd_prices,
+            token_decimals,
         )
     };
     info!(min_bps = cfg.scanner.min_profit_bps, min_usd = cfg.gate.min_profit_usd, "Profit gate initialized");
@@ -380,6 +562,10 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
         paths = paths.len(), dry_run, "Scanner loop starting");
 
     let mut circuit_breaker = PathCircuitBreaker::new();
+    let mut token_breaker = TokenCircuitBreaker::new(5, 200);
+    let blacklist_path = std::path::Path::new("discovery")
+        .join(format!("blacklist.{}.json", chain_name.to_lowercase()));
+    token_breaker.load_blacklist(&blacklist_path);
     let (cb_tx, mut cb_rx) = mpsc::channel::<(u32, TxOutcome, u64)>(256);
 
     // Per-minute summary tracking
@@ -420,6 +606,7 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
         let candidates: Vec<_> = initial_results.into_iter()
             .filter(|r| r.profit_bps >= min_initial_bps)
             .filter(|r| !circuit_breaker.is_suppressed(r.path_id, block_number))
+            .filter(|r| !token_breaker.is_path_token_suppressed(&paths[r.path_id as usize], block_number))
             .collect();
 
         if !candidates.is_empty() {

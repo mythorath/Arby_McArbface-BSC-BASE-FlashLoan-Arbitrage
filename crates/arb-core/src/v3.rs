@@ -162,6 +162,65 @@ fn quote_single_tick(
     }
 }
 
+/// Multi-tick approximation for thin V3 pools.
+/// Instead of true tick walking (which requires bitmap state we don't store),
+/// this uses a piecewise approach: if the single-tick quote would consume more
+/// than a threshold fraction of the available liquidity, we haircut the output
+/// to model increased slippage from tick crossings.
+///
+/// The haircut is conservative: better to underestimate output (miss a marginal
+/// arb) than overestimate (submit a reverting tx).
+pub fn quote_multi_tick_approx(
+    amount_in: U256,
+    sqrt_price_x96: U256,
+    liquidity: u128,
+    fee: u32,
+    zero_for_one: bool,
+) -> Result<U256, QuoteError> {
+    let base = quote_single_tick(amount_in, sqrt_price_x96, liquidity, fee, zero_for_one)?;
+    if base.is_zero() {
+        return Ok(U256::ZERO);
+    }
+
+    let l = U256::from(liquidity);
+    let q96 = U256::from(1u128 << 96);
+
+    // Estimate in-range reserve on the input side
+    let reserve_in = if zero_for_one {
+        l.checked_mul(q96)
+            .and_then(|v| v.checked_div(sqrt_price_x96))
+            .unwrap_or(U256::MAX)
+    } else {
+        l.checked_mul(sqrt_price_x96)
+            .and_then(|v| v.checked_div(q96))
+            .unwrap_or(U256::MAX)
+    };
+
+    if reserve_in.is_zero() {
+        return Ok(U256::ZERO);
+    }
+
+    // Compute utilization: what fraction of in-range reserve are we consuming?
+    // If utilization is < 30%, single-tick is accurate enough.
+    // Above 30%, apply a quadratic haircut to model tick-crossing slippage.
+    let fee_amount = amount_in * U256::from(fee) / U256::from(1_000_000u32);
+    let amount_after_fee = amount_in - fee_amount;
+    let utilization_bps = (amount_after_fee * U256::from(10000u32)) / reserve_in;
+    let util: u64 = utilization_bps.try_into().unwrap_or(10000);
+
+    if util <= 3000 {
+        return Ok(base);
+    }
+
+    // Quadratic haircut: output *= (1 - ((util - 0.3) / 0.7)^2 * 0.5)
+    // At 100% utilization, haircut is 50% (very conservative)
+    let excess = util.saturating_sub(3000); // 0..7000 range
+    let penalty_bps = (excess as u128 * excess as u128 * 5000) / (7000 * 7000); // quadratic
+    let multiplier = 10000u64.saturating_sub(penalty_bps as u64);
+
+    Ok((base * U256::from(multiplier)) / U256::from(10000u32))
+}
+
 /// Convert a tick to sqrtPriceX96: sqrt(1.0001^tick) * 2^96
 /// Used when we need to work with tick boundaries.
 pub fn tick_to_sqrt_price_x96(tick: i32) -> U256 {

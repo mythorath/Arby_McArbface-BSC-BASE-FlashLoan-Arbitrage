@@ -9,6 +9,7 @@ members = [
     "crates/arb-mempool",
     "crates/arb-rpc",
     "crates/arb-runner",
+    "crates/arb-discovery",
 ]
 
 [workspace.dependencies]
@@ -40,6 +41,9 @@ hyper = { version = "1", features = ["full"] }
 rand = "0.8"
 parking_lot = "0.12"
 
+chrono = { version = "0.4", features = ["serde"] }
+hex-literal = "0.4"
+
 arb-core = { path = "crates/arb-core" }
 arb-state = { path = "crates/arb-state" }
 arb-paths = { path = "crates/arb-paths" }
@@ -47,6 +51,7 @@ arb-sim = { path = "crates/arb-sim" }
 arb-submit = { path = "crates/arb-submit" }
 arb-mempool = { path = "crates/arb-mempool" }
 arb-rpc = { path = "crates/arb-rpc" }
+arb-discovery = { path = "crates/arb-discovery" }
 
 [profile.release]
 opt-level = 3

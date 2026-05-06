@@ -20,6 +20,7 @@ pub struct ProfitGate {
     pub safety_margin_bps: u32,
     pub stable_pool_extra_margin_bps: u32,
     pub token_usd_prices: HashMap<Address, f64>,
+    pub token_decimals: HashMap<Address, u32>,
 }
 
 impl ProfitGate {
@@ -29,6 +30,7 @@ impl ProfitGate {
         safety_margin_bps: u32,
         stable_pool_extra_margin_bps: u32,
         token_usd_prices: HashMap<Address, f64>,
+        token_decimals: HashMap<Address, u32>,
     ) -> Self {
         Self {
             min_profit_bps,
@@ -36,6 +38,7 @@ impl ProfitGate {
             safety_margin_bps,
             stable_pool_extra_margin_bps,
             token_usd_prices,
+            token_decimals,
         }
     }
 
@@ -80,13 +83,14 @@ impl ProfitGate {
             .copied()
             .unwrap_or(1.0);
 
-        // Determine token decimals from the flash amount magnitude
-        // Heuristic: if flash_amount > 1e15, it's an 18-decimal token
-        let decimals_factor = if result.flash_amount > U256::from(1_000_000_000_000_000u64) {
-            1e18
-        } else {
-            1e6
-        };
+        let decimals = self.token_decimals
+            .get(&result.flash_token)
+            .copied()
+            .unwrap_or_else(|| {
+                // Fallback heuristic for tokens not in registry
+                if result.flash_amount > U256::from(1_000_000_000_000_000u64) { 18 } else { 6 }
+            });
+        let decimals_factor = 10f64.powi(decimals as i32);
 
         let gross_profit_f64: f64 = result
             .gross_profit

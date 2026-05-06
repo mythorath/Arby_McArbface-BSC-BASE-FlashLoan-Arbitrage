@@ -101,7 +101,7 @@ impl PresignPool {
             chain_id: Some(self.chain_id),
             nonce,
             gas_price,
-            gas_limit: 500_000,
+            gas_limit: 200_000 + 150_000 * tpl.swap_instructions.len() as u64,
             to: arb_contract.into(),
             value: U256::ZERO,
             input: Bytes::from(calldata).into(),

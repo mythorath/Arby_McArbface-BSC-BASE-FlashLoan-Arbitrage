@@ -19,6 +19,7 @@ arb-sim = { workspace = true }
 arb-submit = { workspace = true }
 arb-mempool = { workspace = true }
 arb-rpc = { workspace = true }
+arb-discovery = { workspace = true }
 alloy = { workspace = true }
 alloy-primitives = { workspace = true }
 alloy-rpc-types = { workspace = true }

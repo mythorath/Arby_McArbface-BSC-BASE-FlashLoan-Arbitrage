@@ -1,5 +1,6 @@
 mod config;
 mod metrics;
+mod pricing;
 mod runner;
 
 use anyhow::Result;

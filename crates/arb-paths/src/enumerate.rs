@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use alloy_primitives::{Address, U256};
 use tracing::info;
@@ -20,6 +20,9 @@ pub struct PathEnumerator {
     pools: Vec<PoolInfo>,
     flash_tokens: Vec<Address>,
     flash_amounts: HashMap<Address, U256>,
+    max_hops: usize,
+    max_paths_per_flash_token: usize,
+    max_paths_through_token: usize,
 }
 
 impl PathEnumerator {
@@ -32,16 +35,28 @@ impl PathEnumerator {
             pools,
             flash_tokens,
             flash_amounts,
+            max_hops: 4,
+            max_paths_per_flash_token: 25000,
+            max_paths_through_token: 200,
         }
     }
 
-    /// Generate all valid 2-hop and 3-hop closed-loop paths.
+    pub fn with_limits(
+        mut self,
+        max_hops: usize,
+        max_paths_per_flash_token: usize,
+        max_paths_through_token: usize,
+    ) -> Self {
+        self.max_hops = max_hops;
+        self.max_paths_per_flash_token = max_paths_per_flash_token;
+        self.max_paths_through_token = max_paths_through_token;
+        self
+    }
+
     pub fn enumerate(&self) -> Vec<PathTemplate> {
         let mut paths = Vec::new();
         let mut id_counter: u32 = 0;
 
-        // Build adjacency: token -> list of (pool_index, other_token)
-        // Skip V4 pools — they are only used as the flash loan source, not as swap hops.
         let mut adjacency: HashMap<Address, Vec<(usize, Address)>> = HashMap::new();
         for (idx, pool) in self.pools.iter().enumerate() {
             if pool.protocol == Protocol::UniswapV4 {
@@ -64,91 +79,135 @@ impl PathEnumerator {
                 .copied()
                 .unwrap_or(U256::from(5_000_000u64));
 
-            let neighbors = match adjacency.get(&flash_token) {
-                Some(n) => n,
-                None => continue,
-            };
+            let mut flash_paths = Vec::new();
+            let mut token_path_counts: HashMap<Address, usize> = HashMap::new();
 
-            // 2-hop paths: flash_token -> mid -> flash_token
-            for &(pool1_idx, mid_token) in neighbors {
-                if mid_token == flash_token {
-                    continue;
-                }
-                if let Some(mid_neighbors) = adjacency.get(&mid_token) {
-                    for &(pool2_idx, end_token) in mid_neighbors {
-                        if end_token != flash_token {
-                            continue;
-                        }
-                        if pool1_idx == pool2_idx {
-                            continue;
-                        }
+            Self::dfs(
+                &adjacency,
+                &self.pools,
+                flash_token,
+                flash_token,
+                flash_amount,
+                &mut Vec::new(),
+                &mut HashSet::new(),
+                &mut HashSet::new(),
+                0,
+                self.max_hops,
+                self.max_paths_per_flash_token,
+                self.max_paths_through_token,
+                &mut flash_paths,
+                &mut token_path_counts,
+                &mut id_counter,
+            );
 
-                        let path = PathTemplate {
-                            id: id_counter,
-                            flash_token,
-                            flash_amount,
-                            hops: vec![
-                                make_hop(&self.pools[pool1_idx], flash_token, mid_token),
-                                make_hop(&self.pools[pool2_idx], mid_token, flash_token),
-                            ],
-                        };
-                        debug_assert!(path.is_valid());
-                        paths.push(path);
-                        id_counter += 1;
-                    }
-                }
-            }
+            let two = flash_paths.iter().filter(|p| p.num_hops() == 2).count();
+            let three = flash_paths.iter().filter(|p| p.num_hops() == 3).count();
+            let four_plus = flash_paths.iter().filter(|p| p.num_hops() >= 4).count();
 
-            // 3-hop paths: flash_token -> A -> B -> flash_token
-            for &(pool1_idx, token_a) in neighbors {
-                if token_a == flash_token {
-                    continue;
-                }
-                if let Some(a_neighbors) = adjacency.get(&token_a) {
-                    for &(pool2_idx, token_b) in a_neighbors {
-                        if token_b == flash_token || token_b == token_a {
-                            continue;
-                        }
-                        if pool2_idx == pool1_idx {
-                            continue;
-                        }
-                        if let Some(b_neighbors) = adjacency.get(&token_b) {
-                            for &(pool3_idx, end_token) in b_neighbors {
-                                if end_token != flash_token {
-                                    continue;
-                                }
-                                if pool3_idx == pool1_idx || pool3_idx == pool2_idx {
-                                    continue;
-                                }
+            info!(
+                flash_token = %flash_token,
+                total = flash_paths.len(),
+                two_hop = two,
+                three_hop = three,
+                four_plus_hop = four_plus,
+                "Paths enumerated for flash token"
+            );
 
-                                let path = PathTemplate {
-                                    id: id_counter,
-                                    flash_token,
-                                    flash_amount,
-                                    hops: vec![
-                                        make_hop(&self.pools[pool1_idx], flash_token, token_a),
-                                        make_hop(&self.pools[pool2_idx], token_a, token_b),
-                                        make_hop(&self.pools[pool3_idx], token_b, flash_token),
-                                    ],
-                                };
-                                debug_assert!(path.is_valid());
-                                paths.push(path);
-                                id_counter += 1;
-                            }
-                        }
-                    }
-                }
-            }
+            paths.extend(flash_paths);
         }
 
         info!(
             total_paths = paths.len(),
             two_hop = paths.iter().filter(|p| p.num_hops() == 2).count(),
             three_hop = paths.iter().filter(|p| p.num_hops() == 3).count(),
+            four_plus = paths.iter().filter(|p| p.num_hops() >= 4).count(),
+            max_hops = self.max_hops,
             "Path enumeration complete"
         );
 
         paths
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dfs(
+        adjacency: &HashMap<Address, Vec<(usize, Address)>>,
+        pools: &[PoolInfo],
+        flash_token: Address,
+        current_token: Address,
+        flash_amount: U256,
+        hops: &mut Vec<HopTemplate>,
+        used_pools: &mut HashSet<usize>,
+        visited_tokens: &mut HashSet<Address>,
+        depth: usize,
+        max_hops: usize,
+        max_paths: usize,
+        max_per_token: usize,
+        results: &mut Vec<PathTemplate>,
+        token_counts: &mut HashMap<Address, usize>,
+        id_counter: &mut u32,
+    ) {
+        if results.len() >= max_paths {
+            return;
+        }
+
+        if depth > 0 && current_token == flash_token {
+            let path = PathTemplate {
+                id: *id_counter,
+                flash_token,
+                flash_amount,
+                hops: hops.clone(),
+            };
+            debug_assert!(path.is_valid());
+            results.push(path);
+            *id_counter += 1;
+            return;
+        }
+
+        if depth >= max_hops {
+            return;
+        }
+
+        let neighbors = match adjacency.get(&current_token) {
+            Some(n) => n,
+            None => return,
+        };
+
+        for &(pool_idx, next_token) in neighbors {
+            if used_pools.contains(&pool_idx) {
+                continue;
+            }
+
+            if next_token != flash_token && visited_tokens.contains(&next_token) {
+                continue;
+            }
+
+            if next_token != flash_token {
+                let count = token_counts.get(&next_token).copied().unwrap_or(0);
+                if count >= max_per_token {
+                    continue;
+                }
+            }
+
+            hops.push(make_hop(&pools[pool_idx], current_token, next_token));
+            used_pools.insert(pool_idx);
+            if next_token != flash_token {
+                visited_tokens.insert(next_token);
+                *token_counts.entry(next_token).or_insert(0) += 1;
+            }
+
+            Self::dfs(
+                adjacency, pools, flash_token, next_token, flash_amount,
+                hops, used_pools, visited_tokens,
+                depth + 1, max_hops, max_paths, max_per_token,
+                results, token_counts, id_counter,
+            );
+
+            hops.pop();
+            used_pools.remove(&pool_idx);
+            if next_token != flash_token {
+                visited_tokens.remove(&next_token);
+            }
+        }
     }
 }
 

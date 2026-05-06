@@ -223,3 +223,38 @@ protocol = "algebra"
 token0 = "ETH"
 token1 = "WBNB"
 fee_bps = 5
+
+# === Discovery settings (arb-discover) ===
+
+[discovery]
+min_liquidity_usd = 25000
+min_volume_usd_24h = 50000
+max_buy_tax_bps = 100
+max_sell_tax_bps = 100
+skip_onchain_probe = false
+require_cmc_audit_passed = true
+require_social_presence = true
+
+[discovery.cmc]
+api_key_env = "CMC_API_KEY"
+monthly_credit_budget = 75000
+per_minute_request_cap = 250
+new_list_interval_secs = 300
+meme_list_interval_secs = 600
+gainer_loser_interval_secs = 600
+trending_interval_secs = 1800
+weekly_recheck_token_cap = 200
+
+[scanner.paths]
+max_hops = 4
+max_paths_per_flash_token = 25000
+max_paths_through_token = 200
+
+[circuit_breaker]
+token_revert_threshold = 5
+token_suppression_blocks = 200
+
+[pricing]
+thin_pool_threshold_usd = 50000
+cmc_drift_alert_pct = 25.0
+refresh_blocks = 100

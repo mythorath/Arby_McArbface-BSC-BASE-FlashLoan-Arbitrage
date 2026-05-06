@@ -76,6 +76,8 @@ pub struct StateRefresher {
 }
 
 impl StateRefresher {
+    const CHUNK_SIZE: usize = 50;
+
     pub fn new(
         endpoint: Arc<Endpoint>,
         state_reader_addr: Address,
@@ -99,112 +101,132 @@ impl StateRefresher {
         let provider = self.endpoint.provider();
         let reader = IStateReader::new(self.state_reader_addr, provider);
 
-        // Run all reads in parallel
-        let (v2_result, v3_result, algebra_result, aero_result) = tokio::join!(
+        let v2_chunks: Vec<_> = v2_addrs.chunks(Self::CHUNK_SIZE)
+            .map(|c| c.to_vec())
+            .collect();
+        let v3_chunks: Vec<_> = v3_addrs.chunks(Self::CHUNK_SIZE)
+            .map(|c| c.to_vec())
+            .collect();
+        let algebra_chunks: Vec<_> = algebra_addrs.chunks(Self::CHUNK_SIZE)
+            .map(|c| c.to_vec())
+            .collect();
+        let aero_chunks: Vec<_> = aero_addrs.chunks(Self::CHUNK_SIZE)
+            .map(|c| c.to_vec())
+            .collect();
+
+        let (v2_results, v3_results, algebra_results, aero_results) = tokio::join!(
             async {
-                if v2_addrs.is_empty() { return Ok(vec![]); }
-                reader.readV2(v2_addrs.clone()).call().await
+                let mut all = Vec::new();
+                for chunk in &v2_chunks {
+                    match reader.readV2(chunk.clone()).call().await {
+                        Ok(states) => all.extend(states),
+                        Err(e) => warn!(chunk_size = chunk.len(), "V2 chunk read failed: {e}"),
+                    }
+                }
+                all
             },
             async {
-                if v3_addrs.is_empty() { return Ok(vec![]); }
-                reader.readV3(v3_addrs.clone()).call().await
+                let mut all = Vec::new();
+                for chunk in &v3_chunks {
+                    match reader.readV3(chunk.clone()).call().await {
+                        Ok(states) => all.extend(states),
+                        Err(e) => warn!(chunk_size = chunk.len(), "V3 chunk read failed: {e}"),
+                    }
+                }
+                all
             },
             async {
-                if algebra_addrs.is_empty() { return Ok(vec![]); }
-                reader.readAlgebra(algebra_addrs.clone()).call().await
+                let mut all = Vec::new();
+                for chunk in &algebra_chunks {
+                    match reader.readAlgebra(chunk.clone()).call().await {
+                        Ok(states) => all.extend(states),
+                        Err(e) => warn!(chunk_size = chunk.len(), "Algebra chunk read failed: {e}"),
+                    }
+                }
+                all
             },
             async {
-                if aero_addrs.is_empty() { return Ok(vec![]); }
-                reader.readAeroV2(aero_addrs.clone()).call().await
+                let mut all = Vec::new();
+                for chunk in &aero_chunks {
+                    match reader.readAeroV2(chunk.clone()).call().await {
+                        Ok(states) => all.extend(states),
+                        Err(e) => warn!(chunk_size = chunk.len(), "AeroV2 chunk read failed: {e}"),
+                    }
+                }
+                all
             },
         );
 
-        if let Ok(states) = v2_result {
-            for s in &states {
-                let fee_bps = self.fee_for_pool(&s.pool);
-                store.update(
-                    s.pool,
-                    PoolState::V2(V2PoolState {
-                        address: s.pool,
-                        token0: s.token0,
-                        token1: s.token1,
-                        reserve0: U256::from(s.reserve0),
-                        reserve1: U256::from(s.reserve1),
-                        fee_bps,
-                    }),
-                );
-                updated += 1;
-            }
-        } else if let Err(e) = &v2_result {
-            warn!("V2 state read failed: {e}");
+        for s in &v2_results {
+            let fee_bps = self.fee_for_pool(&s.pool);
+            store.update(
+                s.pool,
+                PoolState::V2(V2PoolState {
+                    address: s.pool,
+                    token0: s.token0,
+                    token1: s.token1,
+                    reserve0: U256::from(s.reserve0),
+                    reserve1: U256::from(s.reserve1),
+                    fee_bps,
+                }),
+            );
+            updated += 1;
         }
 
-        if let Ok(states) = v3_result {
-            for s in &states {
-                if s.sqrtPriceX96.is_zero() {
-                    continue;
-                }
-                store.update(
-                    s.pool,
-                    PoolState::V3(V3PoolState {
-                        address: s.pool,
-                        token0: s.token0,
-                        token1: s.token1,
-                        sqrt_price_x96: U256::from(s.sqrtPriceX96),
-                        tick: s.tick.as_i32(),
-                        liquidity: s.liquidity,
-                        fee: s.fee.to::<u32>(),
-                    }),
-                );
-                updated += 1;
+        for s in &v3_results {
+            if s.sqrtPriceX96.is_zero() {
+                continue;
             }
-        } else if let Err(e) = &v3_result {
-            warn!("V3 state read failed: {e}");
+            store.update(
+                s.pool,
+                PoolState::V3(V3PoolState {
+                    address: s.pool,
+                    token0: s.token0,
+                    token1: s.token1,
+                    sqrt_price_x96: U256::from(s.sqrtPriceX96),
+                    tick: s.tick.as_i32(),
+                    liquidity: s.liquidity,
+                    fee: s.fee.to::<u32>(),
+                }),
+            );
+            updated += 1;
         }
 
-        if let Ok(states) = algebra_result {
-            for s in &states {
-                if s.sqrtPriceX96.is_zero() {
-                    continue;
-                }
-                store.update(
-                    s.pool,
-                    PoolState::V3(V3PoolState {
-                        address: s.pool,
-                        token0: s.token0,
-                        token1: s.token1,
-                        sqrt_price_x96: U256::from(s.sqrtPriceX96),
-                        tick: s.tick.as_i32(),
-                        liquidity: s.liquidity,
-                        fee: s.feeZto as u32,  
-                    }),
-                );
-                updated += 1;
+        for s in &algebra_results {
+            if s.sqrtPriceX96.is_zero() {
+                continue;
             }
-        } else if let Err(e) = &algebra_result {
-            warn!("Algebra state read failed: {e}");
+            store.update(
+                s.pool,
+                PoolState::V3(V3PoolState {
+                    address: s.pool,
+                    token0: s.token0,
+                    token1: s.token1,
+                    sqrt_price_x96: U256::from(s.sqrtPriceX96),
+                    tick: s.tick.as_i32(),
+                    liquidity: s.liquidity,
+                    fee: s.feeZto as u32,
+                }),
+            );
+            updated += 1;
         }
 
-        if let Ok(states) = aero_result {
-            for s in &states {
-                store.update(
-                    s.pool,
-                    PoolState::AeroV2(AeroV2PoolState {
-                        address: s.pool,
-                        token0: s.token0,
-                        token1: s.token1,
-                        reserve0: s.reserve0,
-                        reserve1: s.reserve1,
-                        stable: s.stable,
-                        fee_bps: self.fee_for_pool(&s.pool),
-                        decimals0: s.decimals0,
-                        decimals1: s.decimals1,
-                    }),
-                );
-                updated += 1;
-            }
-        } else if let Err(e) = &aero_result {
-            warn!("AeroV2 state read failed: {e}");
+        for s in &aero_results {
+            store.update(
+                s.pool,
+                PoolState::AeroV2(AeroV2PoolState {
+                    address: s.pool,
+                    token0: s.token0,
+                    token1: s.token1,
+                    reserve0: s.reserve0,
+                    reserve1: s.reserve1,
+                    stable: s.stable,
+                    fee_bps: self.fee_for_pool(&s.pool),
+                    decimals0: s.decimals0,
+                    decimals1: s.decimals1,
+                }),
+            );
+            updated += 1;
         }
 
         let block = self.endpoint.block_number().await.unwrap_or(0);

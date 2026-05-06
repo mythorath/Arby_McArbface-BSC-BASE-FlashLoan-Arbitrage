@@ -11,11 +11,12 @@ import json, os, sys, time, re
 from collections import deque
 from datetime import datetime, timezone
 
-STATUS_DIR = "status"
-LOG_DIR    = "logs"
-CHAINS     = ["bsc", "base"]
-REFRESH_S  = 2
-MAX_EVENTS = 24          # recent event rows to show
+STATUS_DIR    = "status"
+LOG_DIR       = "logs"
+DISCOVERY_DIR = "discovery"
+CHAINS        = ["bsc", "base"]
+REFRESH_S     = 2
+MAX_EVENTS    = 24          # recent event rows to show
 NATIVE_PRICES = {"BSC": 600.0, "Base": 2500.0}
 NATIVE_SYMBOL = {"BSC": "BNB", "Base": "ETH"}
 
@@ -36,7 +37,7 @@ EVENT_RE = re.compile(
 )
 
 INTERESTING = re.compile(
-    r"Optimized path|Submitted|landed|Backrun|circuit-breaker|minute summary"
+    r"Optimized path|Submitted|landed|Backrun|circuit-breaker|Token circuit-breaker|minute summary|Discovery updated"
 )
 
 
@@ -47,6 +48,45 @@ def load_status(chain: str) -> dict | None:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return None
+
+
+def load_discovery(chain: str) -> dict:
+    """Load discovery stats for a chain."""
+    result = {"pools": 0, "tokens": 0, "blacklisted": 0}
+    try:
+        pool_path = os.path.join(DISCOVERY_DIR, f"pool_universe.{chain}.json")
+        with open(pool_path) as f:
+            data = json.load(f)
+            result["pools"] = len(data.get("pools", []))
+            liq_buckets = {"<50k": 0, "50k-250k": 0, "250k-1M": 0, ">1M": 0}
+            for p in data.get("pools", []):
+                liq = p.get("liquidity_usd", 0)
+                if liq < 50_000:
+                    liq_buckets["<50k"] += 1
+                elif liq < 250_000:
+                    liq_buckets["50k-250k"] += 1
+                elif liq < 1_000_000:
+                    liq_buckets["250k-1M"] += 1
+                else:
+                    liq_buckets[">1M"] += 1
+            result["liq_buckets"] = liq_buckets
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    try:
+        tok_path = os.path.join(DISCOVERY_DIR, f"token_universe.{chain}.json")
+        with open(tok_path) as f:
+            data = json.load(f)
+            result["tokens"] = len(data.get("tokens", []))
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    try:
+        bl_path = os.path.join(DISCOVERY_DIR, f"blacklist.{chain}.json")
+        with open(bl_path) as f:
+            data = json.load(f)
+            result["blacklisted"] = len(data.get("addresses", []))
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return result
 
 
 def tail_events(chain: str, n: int = 50) -> list[str]:
@@ -114,6 +154,11 @@ def colorize_event(line: str, chain_tag: str) -> str:
         usd = usd_m.group(1) if usd_m else "?"
         return f"  {YELLOW}** FOUND  {RESET}  {tag} {short_ts}  path={pid} {bps}bps ${usd}"
 
+    if "Token circuit-breaker" in line:
+        tok_m = re.search(r"token=([0-9a-fA-Fx]{10})", line)
+        tok = tok_m.group(1) if tok_m else "?"
+        return f"  {BG_RED}{WHITE}!! TKBRK  {RESET}  {tag} {short_ts}  token={tok} suppressed"
+
     if "circuit-breaker" in line:
         pid_m = re.search(r"path_id=(\d+)", line)
         pid = pid_m.group(1) if pid_m else "?"
@@ -176,6 +221,20 @@ def render_chain_header(d: dict, chain: str) -> list[str]:
             c = GREEN if o > 0 else (RED if r > 0 and o == 0 else WHITE)
             parts.append(f"{c}#{pid}{RESET}({s}/{o}/{r})")
         lines.append(f"    hot paths (sub/ok/rev): {' '.join(parts)}")
+
+    disc = load_discovery(chain)
+    if disc["pools"] > 0 or disc["tokens"] > 0:
+        bl = disc["blacklisted"]
+        bl_str = f"  {RED}bl {bl}{RESET}" if bl > 0 else ""
+        lines.append(
+            f"    {CYAN}discovery:{RESET} {disc['pools']} pools  "
+            f"{disc['tokens']} tokens{bl_str}"
+        )
+        buckets = disc.get("liq_buckets", {})
+        if buckets:
+            parts = [f"{k}:{v}" for k, v in buckets.items() if v > 0]
+            if parts:
+                lines.append(f"    pool liquidity: {DIM}{', '.join(parts)}{RESET}")
 
     return lines
 
