@@ -16,14 +16,21 @@ struct RateLimiter {
     tokens: Mutex<u32>,
     max_per_minute: u32,
     last_refill: Mutex<Instant>,
+    refill_interval_ms: u64,
 }
 
 impl RateLimiter {
     fn new(max_per_minute: u32) -> Self {
+        let refill_interval_ms = if max_per_minute > 0 {
+            60_000 / max_per_minute as u64
+        } else {
+            60_000
+        };
         Self {
             tokens: Mutex::new(max_per_minute),
             max_per_minute,
             last_refill: Mutex::new(Instant::now()),
+            refill_interval_ms,
         }
     }
 
@@ -31,8 +38,11 @@ impl RateLimiter {
         loop {
             {
                 let mut last = self.last_refill.lock();
-                if last.elapsed() >= Duration::from_secs(60) {
-                    *self.tokens.lock() = self.max_per_minute;
+                let elapsed_ms = last.elapsed().as_millis() as u64;
+                if elapsed_ms >= self.refill_interval_ms {
+                    let new_tokens = (elapsed_ms / self.refill_interval_ms) as u32;
+                    let mut t = self.tokens.lock();
+                    *t = (*t + new_tokens).min(self.max_per_minute);
                     *last = Instant::now();
                 }
 
@@ -42,7 +52,7 @@ impl RateLimiter {
                     return;
                 }
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::time::sleep(Duration::from_millis(self.refill_interval_ms.min(250))).await;
         }
     }
 }
@@ -739,5 +749,16 @@ mod tests {
 
         let t1 = pool.t1.unwrap();
         assert_eq!(t1.sym.as_deref(), Some("USDC"));
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_gradual_refill() {
+        let limiter = RateLimiter::new(60);
+        for _ in 0..60 {
+            limiter.acquire().await;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let result = tokio::time::timeout(Duration::from_millis(100), limiter.acquire()).await;
+        assert!(result.is_ok(), "Should have refilled at least one token");
     }
 }

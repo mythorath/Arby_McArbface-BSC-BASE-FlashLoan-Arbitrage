@@ -17,7 +17,7 @@ contract DeployBase is Script {
     address constant cbETH  = 0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22;
 
     function run() external {
-        uint256 deployerKey = vm.envUint("PRIVATE_KEY");
+        uint256 deployerKey = vm.envUint("DEPLOYER_KEY");
         vm.startBroadcast(deployerKey);
 
         address[] memory tokens = new address[](5);

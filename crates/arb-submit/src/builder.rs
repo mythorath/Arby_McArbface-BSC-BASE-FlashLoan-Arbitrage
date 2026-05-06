@@ -91,28 +91,49 @@ pub async fn build_bundle(
     let nonce = endpoint.get_nonce(signer.address()).await?;
     let gas_price = endpoint.gas_price().await?;
 
-    let tx = alloy::consensus::TxLegacy {
-        chain_id: Some(chain_id),
-        nonce,
-        gas_price,
-        gas_limit: 500_000,
-        to: arb_contract.into(),
-        value: U256::ZERO,
-        input: Bytes::from(calldata).into(),
+    let buf = if chain_id == 8453 {
+        let max_priority_fee: u128 = 1_000_000_000;
+        let max_fee = gas_price.saturating_mul(2).saturating_add(max_priority_fee);
+        let tx = alloy::consensus::TxEip1559 {
+            chain_id,
+            nonce,
+            gas_limit: 500_000,
+            max_fee_per_gas: max_fee,
+            max_priority_fee_per_gas: max_priority_fee,
+            to: arb_contract.into(),
+            value: U256::ZERO,
+            input: Bytes::from(calldata).into(),
+            access_list: Default::default(),
+        };
+        let sig = signer
+            .sign_hash(&alloy::consensus::SignableTransaction::signature_hash(&tx))
+            .await?;
+        let envelope = alloy::consensus::TxEnvelope::Eip1559(
+            alloy::consensus::Signed::new_unchecked(tx, sig, Default::default()),
+        );
+        let mut b = Vec::new();
+        alloy::eips::eip2718::Encodable2718::encode_2718(&envelope, &mut b);
+        b
+    } else {
+        let tx = alloy::consensus::TxLegacy {
+            chain_id: Some(chain_id),
+            nonce,
+            gas_price,
+            gas_limit: 500_000,
+            to: arb_contract.into(),
+            value: U256::ZERO,
+            input: Bytes::from(calldata).into(),
+        };
+        let sig = signer
+            .sign_hash(&alloy::consensus::SignableTransaction::signature_hash(&tx))
+            .await?;
+        let envelope = alloy::consensus::TxEnvelope::Legacy(
+            alloy::consensus::Signed::new_unchecked(tx, sig, Default::default()),
+        );
+        let mut b = Vec::new();
+        alloy::eips::eip2718::Encodable2718::encode_2718(&envelope, &mut b);
+        b
     };
-
-    let sig = signer
-        .sign_hash(&alloy::consensus::SignableTransaction::signature_hash(&tx))
-        .await?;
-
-    let signed = alloy::consensus::TxEnvelope::Legacy(alloy::consensus::Signed::new_unchecked(
-        tx,
-        sig,
-        Default::default(),
-    ));
-
-    let mut buf = Vec::new();
-    alloy::eips::eip2718::Encodable2718::encode_2718(&signed, &mut buf);
 
     Ok(Bundle {
         signed_txs: vec![buf],

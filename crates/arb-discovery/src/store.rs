@@ -1,4 +1,7 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
 use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use tracing::{info, warn};
@@ -80,13 +83,43 @@ pub struct CreditLedger {
 
 pub struct DiscoveryStore {
     base_dir: PathBuf,
+    blacklist_cache: Mutex<Option<HashSet<String>>>,
 }
 
 impl DiscoveryStore {
     pub fn new(base_dir: &Path) -> Self {
         Self {
             base_dir: base_dir.to_path_buf(),
+            blacklist_cache: Mutex::new(None),
         }
+    }
+
+    pub async fn load_pools_async(&self, chain: &str) -> Result<PoolUniverse> {
+        let path = self.base_dir.join(format!("pool_universe.{chain}.json"));
+        if !path.exists() {
+            return Ok(PoolUniverse {
+                chain: chain.to_string(),
+                ..Default::default()
+            });
+        }
+        let data = tokio::fs::read_to_string(&path).await?;
+        let universe: PoolUniverse = serde_json::from_str(&data)?;
+        info!(chain, pools = universe.pools.len(), "Loaded pool universe (async)");
+        Ok(universe)
+    }
+
+    pub async fn load_tokens_async(&self, chain: &str) -> Result<TokenUniverse> {
+        let path = self.base_dir.join(format!("token_universe.{chain}.json"));
+        if !path.exists() {
+            return Ok(TokenUniverse {
+                chain: chain.to_string(),
+                ..Default::default()
+            });
+        }
+        let data = tokio::fs::read_to_string(&path).await?;
+        let universe: TokenUniverse = serde_json::from_str(&data)?;
+        info!(chain, tokens = universe.tokens.len(), "Loaded token universe (async)");
+        Ok(universe)
     }
 
     pub fn load_pools(&self, chain: &str) -> Result<PoolUniverse> {
@@ -172,17 +205,45 @@ impl DiscoveryStore {
         let data = serde_json::to_string_pretty(&blacklist)?;
         std::fs::write(&tmp_path, &data)?;
         std::fs::rename(&tmp_path, &path)?;
+
+        if let Ok(mut cache) = self.blacklist_cache.lock() {
+            if let Some(ref mut set) = *cache {
+                set.insert(addr_lower);
+            }
+        }
         warn!(chain, address, reason, "Added to blacklist");
         Ok(())
     }
 
     pub fn is_blacklisted(&self, chain: &str, address: &str) -> Result<bool> {
-        let blacklist = self.load_blacklist(chain)?;
         let addr_lower = address.to_lowercase();
-        Ok(blacklist
-            .addresses
-            .iter()
-            .any(|e| e.address.to_lowercase() == addr_lower))
+        let mut cache = self.blacklist_cache.lock().unwrap();
+        if cache.is_none() {
+            let blacklist = self.load_blacklist(chain)?;
+            let set: HashSet<String> = blacklist.addresses.iter()
+                .map(|e| e.address.to_lowercase())
+                .collect();
+            *cache = Some(set);
+        }
+        Ok(cache.as_ref().unwrap().contains(&addr_lower))
+    }
+
+    pub fn prune_stale_pools(&self, chain: &str, max_age_days: i64) -> Result<usize> {
+        let mut universe = self.load_pools(chain)?;
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days);
+        let before = universe.pools.len();
+        universe.pools.retain(|p| {
+            chrono::DateTime::parse_from_rfc3339(&p.last_seen)
+                .map(|dt| dt >= cutoff)
+                .unwrap_or(true)
+        });
+        let pruned = before - universe.pools.len();
+        if pruned > 0 {
+            universe.last_updated = chrono::Utc::now().to_rfc3339();
+            self.save_pools(chain, &universe)?;
+            info!(chain, pruned, remaining = universe.pools.len(), "Pruned stale pools");
+        }
+        Ok(pruned)
     }
 
     pub fn load_credits(&self) -> Result<CreditLedger> {
@@ -362,5 +423,72 @@ mod tests {
 
         let final_path = dir.path().join("pool_universe.ethereum.json");
         assert!(final_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_async_load_pools() {
+        let (_dir, store) = make_store();
+        let universe = PoolUniverse {
+            chain: "bsc".into(),
+            pools: vec![sample_pool("0xpool1")],
+            last_updated: "2026-01-01T00:00:00Z".into(),
+        };
+        store.save_pools("bsc", &universe).unwrap();
+        let loaded = store.load_pools_async("bsc").await.unwrap();
+        assert_eq!(loaded.pools.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_async_load_tokens() {
+        let (_dir, store) = make_store();
+        let universe = TokenUniverse {
+            chain: "bsc".into(),
+            tokens: vec![sample_token("0xt1")],
+            last_updated: "2026-01-01T00:00:00Z".into(),
+        };
+        store.save_tokens("bsc", &universe).unwrap();
+        let loaded = store.load_tokens_async("bsc").await.unwrap();
+        assert_eq!(loaded.tokens.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_async_load_missing() {
+        let (_dir, store) = make_store();
+        let loaded = store.load_pools_async("nonexistent").await.unwrap();
+        assert!(loaded.pools.is_empty());
+    }
+
+    #[test]
+    fn test_blacklist_cache_invalidation() {
+        let (_dir, store) = make_store();
+        assert!(!store.is_blacklisted("bsc", "0xabc").unwrap());
+        store.add_to_blacklist("bsc", "0xABC", "test").unwrap();
+        assert!(store.is_blacklisted("bsc", "0xabc").unwrap());
+    }
+
+    #[test]
+    fn test_prune_stale_pools() {
+        let (_dir, store) = make_store();
+        let old_date = (chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339();
+        let recent_date = chrono::Utc::now().to_rfc3339();
+
+        let mut old_pool = sample_pool("0xold");
+        old_pool.last_seen = old_date;
+        let mut new_pool = sample_pool("0xnew");
+        new_pool.last_seen = recent_date;
+
+        let universe = PoolUniverse {
+            chain: "bsc".into(),
+            pools: vec![old_pool, new_pool],
+            last_updated: chrono::Utc::now().to_rfc3339(),
+        };
+        store.save_pools("bsc", &universe).unwrap();
+
+        let pruned = store.prune_stale_pools("bsc", 30).unwrap();
+        assert_eq!(pruned, 1);
+
+        let loaded = store.load_pools("bsc").unwrap();
+        assert_eq!(loaded.pools.len(), 1);
+        assert_eq!(loaded.pools[0].address, "0xnew");
     }
 }

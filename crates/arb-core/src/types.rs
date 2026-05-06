@@ -67,6 +67,9 @@ pub struct V3PoolState {
     pub tick: i32,
     pub liquidity: u128,
     pub fee: u32,
+    /// Algebra pools have directional fees; `fee_otz` is the fee for token1->token0.
+    /// For non-Algebra V3 pools this equals `fee`.
+    pub fee_otz: Option<u32>,
 }
 
 #[derive(Debug, Clone)]

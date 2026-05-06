@@ -53,12 +53,14 @@ async fn main() -> Result<()> {
             address: p.address.parse().expect("Invalid pool address"),
             protocol: p.parse_protocol(),
             fee_bps: p.fee_bps,
+            token0: tokens.get(&p.token0).copied(),
+            token1: tokens.get(&p.token1).copied(),
         })
         .collect();
 
     let store = Arc::new(PoolStore::new());
     let state_reader: Address = cfg.chain.state_reader.parse()?;
-    let refresher = StateRefresher::new(endpoint.clone(), state_reader, pool_configs);
+    let refresher = StateRefresher::new(endpoint.clone(), state_reader, pool_configs, cfg.chain.chain_id);
 
     let (count, _) = refresher.refresh(&store).await?;
     info!(pools = count, "State loaded");

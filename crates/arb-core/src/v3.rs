@@ -21,14 +21,17 @@ impl AmmQuoter for V3PoolState {
 
         let zero_for_one = token_in == self.token0;
 
-        // Single-tick approximation: assumes the swap stays within the current tick range.
-        // For MEV arb with typical 5-50 USDC flash loan amounts, this is accurate >99% of the time.
-        // Full tick-walking would be needed for large swaps that cross multiple tick boundaries.
+        let fee = if zero_for_one {
+            self.fee
+        } else {
+            self.fee_otz.unwrap_or(self.fee)
+        };
+
         quote_single_tick(
             amount_in,
             self.sqrt_price_x96,
             self.liquidity,
-            self.fee,
+            fee,
             zero_for_one,
         )
     }
@@ -247,6 +250,7 @@ mod tests {
             tick: 0,
             liquidity: liq,
             fee,
+            fee_otz: None,
         }
     }
 
@@ -346,5 +350,58 @@ mod tests {
             diff <= U256::from(1u64),
             "tick 0 should give sqrtPriceX96 ≈ Q96 (2^96), got {result}"
         );
+    }
+
+    #[test]
+    fn test_algebra_directional_fee_zto() {
+        let pool = V3PoolState {
+            address: Address::ZERO,
+            token0: Address::with_last_byte(1),
+            token1: Address::with_last_byte(2),
+            sqrt_price_x96: Q96,
+            tick: 0,
+            liquidity: 1_000_000_000_000u128,
+            fee: 100,
+            fee_otz: Some(500),
+        };
+        let out_zto = pool.quote(pool.token0, U256::from(1_000_000u64)).unwrap();
+        let pool_same = V3PoolState { fee_otz: None, ..pool.clone() };
+        let out_same = pool_same.quote(pool_same.token0, U256::from(1_000_000u64)).unwrap();
+        assert_eq!(out_zto, out_same, "zto should use fee field");
+    }
+
+    #[test]
+    fn test_algebra_directional_fee_otz() {
+        let pool = V3PoolState {
+            address: Address::ZERO,
+            token0: Address::with_last_byte(1),
+            token1: Address::with_last_byte(2),
+            sqrt_price_x96: Q96,
+            tick: 0,
+            liquidity: 1_000_000_000_000u128,
+            fee: 100,
+            fee_otz: Some(500),
+        };
+        let out_otz = pool.quote(pool.token1, U256::from(1_000_000u64)).unwrap();
+        let pool_500 = V3PoolState { fee: 500, fee_otz: None, ..pool.clone() };
+        let out_500 = pool_500.quote(pool_500.token1, U256::from(1_000_000u64)).unwrap();
+        assert_eq!(out_otz, out_500, "otz should use fee_otz when set");
+    }
+
+    #[test]
+    fn test_fee_otz_none_fallback() {
+        let pool = V3PoolState {
+            address: Address::ZERO,
+            token0: Address::with_last_byte(1),
+            token1: Address::with_last_byte(2),
+            sqrt_price_x96: Q96,
+            tick: 0,
+            liquidity: 1_000_000_000_000u128,
+            fee: 3000,
+            fee_otz: None,
+        };
+        let out_zto = pool.quote(pool.token0, U256::from(1_000u64)).unwrap();
+        let out_otz = pool.quote(pool.token1, U256::from(1_000u64)).unwrap();
+        assert_eq!(out_zto, out_otz);
     }
 }

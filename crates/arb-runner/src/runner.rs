@@ -134,6 +134,7 @@ struct TokenCircuitBreaker {
     revert_threshold: u32,
     suppression_blocks: u64,
     blacklist: HashSet<Address>,
+    popular_intermediaries: HashSet<Address>,
 }
 
 struct TokenBreakerStats {
@@ -149,7 +150,12 @@ impl TokenCircuitBreaker {
             revert_threshold,
             suppression_blocks,
             blacklist: HashSet::new(),
+            popular_intermediaries: HashSet::new(),
         }
+    }
+
+    fn set_popular_intermediaries(&mut self, tokens: impl IntoIterator<Item = Address>) {
+        self.popular_intermediaries = tokens.into_iter().collect();
     }
 
     fn load_blacklist(&mut self, path: &std::path::Path) {
@@ -190,6 +196,9 @@ impl TokenCircuitBreaker {
     fn record_revert_for_path(&mut self, path: &PathTemplate, block: u64) {
         for hop in &path.hops {
             for &token in &[hop.token_in, hop.token_out] {
+                if token == path.flash_token || self.popular_intermediaries.contains(&token) {
+                    continue;
+                }
                 let s = self.stats.entry(token).or_insert(TokenBreakerStats {
                     consecutive_reverts: 0,
                     last_revert_block: 0,
@@ -236,7 +245,10 @@ enum TxOutcome { Success, Revert, Dropped }
 /// Returns the outcome so the caller can feed the circuit breaker.
 async fn track_tx(endpoint: Arc<Endpoint>, tx_hash: B256, deadline_blocks: u64) -> TxOutcome {
     let start_block = endpoint.block_number().await.unwrap_or(0);
-    for _ in 0..60 {
+    let max_polls = (deadline_blocks * 4).max(8);
+    let poll_interval_ms = 750;
+
+    for _ in 0..max_polls {
         match endpoint.get_receipt(tx_hash).await {
             Ok(Some(receipt)) => {
                 let success = receipt.status();
@@ -262,7 +274,7 @@ async fn track_tx(endpoint: Arc<Endpoint>, tx_hash: B256, deadline_blocks: u64) 
             debug!(tx = %tx_hash, "Tx dropped (not mined within deadline)");
             return TxOutcome::Dropped;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
     }
     metrics::SUBMIT_LANDED.with_label_values(&["dropped"]).inc();
     TxOutcome::Dropped
@@ -357,6 +369,8 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
             address: p.address.parse().expect("Invalid pool address"),
             protocol: p.parse_protocol(),
             fee_bps: p.fee_bps,
+            token0: tokens.get(&p.token0).copied(),
+            token1: tokens.get(&p.token1).copied(),
         })
         .collect();
 
@@ -383,12 +397,12 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
         token_decimals.insert(addr, dec);
     }
 
-    // Merge discovered pools/tokens from arb-discovery JSON files
+    // Merge discovered pools/tokens from arb-discovery JSON files (async I/O)
     let discovery_store = DiscoveryStore::new(std::path::Path::new("discovery"));
     let chain_lower = chain_name.to_lowercase();
     let toml_pool_addrs: HashSet<Address> = pool_configs.iter().map(|p| p.address).collect();
 
-    if let Ok(pool_universe) = discovery_store.load_pools(&chain_lower) {
+    if let Ok(pool_universe) = discovery_store.load_pools_async(&chain_lower).await {
         let mut merged = 0u32;
         for dp in &pool_universe.pools {
             let addr: Address = match dp.address.parse() {
@@ -420,6 +434,8 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
                 address: addr,
                 protocol,
                 fee_bps: dp.fee_bps,
+                token0: Some(t0),
+                token1: Some(t1),
             });
             pool_infos.push(PoolInfo {
                 address: addr,
@@ -434,7 +450,7 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
         }
     }
 
-    if let Ok(token_universe) = discovery_store.load_tokens(&chain_lower) {
+    if let Ok(token_universe) = discovery_store.load_tokens_async(&chain_lower).await {
         let mut price_merged = 0u32;
         for dt in &token_universe.tokens {
             let addr: Address = match dt.address.parse() {
@@ -455,11 +471,15 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
 
     let store = Arc::new(PoolStore::new());
     let state_reader: Address = cfg.chain.state_reader.parse()?;
-    let refresher = StateRefresher::new(endpoint.clone(), state_reader, pool_configs);
+    let refresher = StateRefresher::new(endpoint.clone(), state_reader, pool_configs, cfg.chain.chain_id);
 
     let (count, elapsed) = refresher.refresh(&store).await?;
     info!(pools = count, elapsed_ms = elapsed.as_millis(), "Initial state refresh complete");
     metrics::POOL_COUNT.set(count as f64);
+
+    let pricing_refresh_blocks: u64 = 100;
+    let derived = crate::pricing::derive_prices(&store, &mut token_usd_prices, &token_decimals);
+    info!(derived, total_priced = token_usd_prices.len(), "Initial price derivation complete");
 
     let flash_tokens: Vec<Address> = cfg.scanner.flash_tokens.iter().map(|name| tokens[name]).collect();
     let flash_amounts: HashMap<Address, U256> = cfg.scanner.flash_amounts.iter()
@@ -522,13 +542,13 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
     let high_ev = submitters.iter().filter(|s| s.tier() == SubmitTier::HighEvOnly).count();
     info!(always_on, high_ev, total = submitters.len(), "Submission layer initialized");
 
-    let profit_gate = if smoke_test {
+    let mut profit_gate = if smoke_test {
         ProfitGate::new(0, 0.0, 0, 0, token_usd_prices.clone(), token_decimals.clone())
     } else {
         ProfitGate::new(
             cfg.scanner.min_profit_bps, cfg.gate.min_profit_usd,
-            cfg.gate.safety_margin_bps, cfg.gate.stable_pool_extra_margin_bps, token_usd_prices,
-            token_decimals,
+            cfg.gate.safety_margin_bps, cfg.gate.stable_pool_extra_margin_bps,
+            token_usd_prices.clone(), token_decimals.clone(),
         )
     };
     info!(min_bps = cfg.scanner.min_profit_bps, min_usd = cfg.gate.min_profit_usd, "Profit gate initialized");
@@ -563,6 +583,7 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
 
     let mut circuit_breaker = PathCircuitBreaker::new();
     let mut token_breaker = TokenCircuitBreaker::new(5, 200);
+    token_breaker.set_popular_intermediaries(tokens.values().copied());
     let blacklist_path = std::path::Path::new("discovery")
         .join(format!("blacklist.{}.json", chain_name.to_lowercase()));
     token_breaker.load_blacklist(&blacklist_path);
@@ -573,6 +594,21 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
     let mut last_scans: f64 = 0.0;
     let mut last_submitted: f64 = 0.0;
     let mut last_status_write = Instant::now();
+    let mut last_pricing_block: u64 = 0;
+
+    // Background balance task (Phase 7f: move RPC out of hot scan loop)
+    let balance_addr = wallet_addr;
+    let balance_ep = endpoint.clone();
+    let (balance_tx, balance_rx) = tokio::sync::watch::channel("unknown".to_string());
+    tokio::spawn(async move {
+        loop {
+            match balance_ep.get_balance(balance_addr).await {
+                Ok(b) => { let _ = balance_tx.send(format!("{b}")); }
+                Err(_) => { let _ = balance_tx.send("unknown".to_string()); }
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    });
 
     while let Some(block) = block_stream.next().await {
         let block_number = block.inner.number;
@@ -596,6 +632,15 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
             Err(e) => {
                 warn!(block = block_number, error = %e, "State refresh failed");
             }
+        }
+
+        if block_number >= last_pricing_block + pricing_refresh_blocks {
+            let derived = crate::pricing::derive_prices(&store, &mut token_usd_prices, &token_decimals);
+            if derived > 0 {
+                profit_gate.token_usd_prices = token_usd_prices.clone();
+                debug!(derived, block = block_number, "Periodic price derivation");
+            }
+            last_pricing_block = block_number;
         }
 
         // === Two-pass evaluate-then-optimize ===
@@ -891,14 +936,156 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
 
         // Status JSON every 5 seconds
         if last_status_write.elapsed() >= Duration::from_secs(5) {
-            let balance_str = match endpoint.get_balance(wallet_addr).await {
-                Ok(b) => format!("{b}"),
-                Err(_) => "unknown".to_string(),
-            };
+            let balance_str = balance_rx.borrow().clone();
             write_status_json(&chain_name, &started, block_number, &balance_str, &circuit_breaker);
             last_status_write = Instant::now();
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arb_paths::HopTemplate;
+
+    fn addr(b: u8) -> Address {
+        Address::with_last_byte(b)
+    }
+
+    fn make_path(id: u32, flash: Address, hops: Vec<(Address, Address, Address)>) -> PathTemplate {
+        PathTemplate {
+            id,
+            flash_token: flash,
+            flash_amount: U256::from(1000u32),
+            hops: hops.into_iter().map(|(pool, tin, tout)| HopTemplate {
+                protocol: arb_core::types::Protocol::UniswapV2,
+                pool, token_in: tin, token_out: tout,
+            }).collect(),
+        }
+    }
+
+    #[test]
+    fn test_token_breaker_skips_flash_token() {
+        let flash = addr(1);
+        let intermediate = addr(2);
+        let target = addr(3);
+        let path = make_path(0, flash, vec![
+            (addr(10), flash, intermediate),
+            (addr(11), intermediate, target),
+            (addr(12), target, flash),
+        ]);
+
+        let mut breaker = TokenCircuitBreaker::new(2, 100);
+        for block in 0..5 {
+            breaker.record_revert_for_path(&path, block);
+        }
+
+        assert!(!breaker.is_token_suppressed(flash, 5),
+            "flash token should never be suppressed");
+    }
+
+    #[test]
+    fn test_token_breaker_skips_popular_intermediary() {
+        let flash = addr(1);
+        let weth = addr(2);
+        let target = addr(3);
+        let path = make_path(0, flash, vec![
+            (addr(10), flash, weth),
+            (addr(11), weth, target),
+            (addr(12), target, flash),
+        ]);
+
+        let mut breaker = TokenCircuitBreaker::new(2, 100);
+        breaker.set_popular_intermediaries(vec![weth]);
+
+        for block in 0..5 {
+            breaker.record_revert_for_path(&path, block);
+        }
+
+        assert!(!breaker.is_token_suppressed(weth, 5),
+            "popular intermediary should not be suppressed");
+        assert!(breaker.is_token_suppressed(target, 5),
+            "non-popular target token should be suppressed");
+    }
+
+    #[test]
+    fn test_token_breaker_suppresses_bad_token() {
+        let flash = addr(1);
+        let good = addr(2);
+        let bad = addr(3);
+        // bad appears in 2 positions (token_out of hop2 and token_in of hop3),
+        // so each record_revert_for_path call increments its counter by 2.
+        let path = make_path(0, flash, vec![
+            (addr(10), flash, good),
+            (addr(11), good, bad),
+            (addr(12), bad, flash),
+        ]);
+
+        let mut breaker = TokenCircuitBreaker::new(5, 100);
+        breaker.set_popular_intermediaries(vec![good]);
+
+        breaker.record_revert_for_path(&path, 1);
+        assert!(!breaker.is_token_suppressed(bad, 2), "2 < 5 threshold");
+
+        breaker.record_revert_for_path(&path, 2);
+        assert!(!breaker.is_token_suppressed(bad, 3), "4 < 5 threshold");
+
+        breaker.record_revert_for_path(&path, 3);
+        assert!(breaker.is_token_suppressed(bad, 4), "6 >= 5 threshold");
+        assert!(!breaker.is_token_suppressed(bad, 104), "expired after suppression window");
+    }
+
+    #[test]
+    fn test_token_breaker_success_resets() {
+        let flash = addr(1);
+        let token = addr(2);
+        let path = make_path(0, flash, vec![
+            (addr(10), flash, token),
+            (addr(11), token, flash),
+        ]);
+
+        let mut breaker = TokenCircuitBreaker::new(3, 100);
+        breaker.record_revert_for_path(&path, 1);
+        breaker.record_revert_for_path(&path, 2);
+        breaker.record_success_for_path(&path);
+        breaker.record_revert_for_path(&path, 3);
+
+        assert!(!breaker.is_token_suppressed(token, 4),
+            "success should reset consecutive count");
+    }
+
+    #[test]
+    fn test_path_circuit_breaker_trip_and_decay() {
+        let mut cb = PathCircuitBreaker::new();
+        cb.record_submit(1);
+        cb.record_revert(1, 100);
+        cb.record_revert(1, 101);
+        assert!(!cb.is_suppressed(1, 102));
+
+        cb.record_revert(1, 102);
+        assert!(cb.is_suppressed(1, 103), "should be suppressed after 3 consecutive reverts");
+        assert!(!cb.is_suppressed(1, 200), "should expire after SUPPRESS_BLOCKS");
+    }
+
+    #[test]
+    fn test_path_circuit_breaker_success_resets() {
+        let mut cb = PathCircuitBreaker::new();
+        cb.record_revert(1, 1);
+        cb.record_revert(1, 2);
+        cb.record_success(1);
+        cb.record_revert(1, 3);
+        assert!(!cb.is_suppressed(1, 4));
+    }
+
+    #[test]
+    fn test_path_circuit_breaker_decay_gap() {
+        let mut cb = PathCircuitBreaker::new();
+        cb.record_revert(1, 10);
+        cb.record_revert(1, 11);
+        cb.record_revert(1, 300);
+        assert!(!cb.is_suppressed(1, 301),
+            "reverts separated by >DECAY_BLOCKS should reset counter");
+    }
 }
