@@ -14,8 +14,8 @@ private_key_env = "PRIVATE_KEY"
 
 [scanner]
 flash_tokens = ["USDT", "USDC", "WBNB"]
-min_profit_bps = 0
-min_initial_bps = 0
+min_profit_bps = 3
+min_initial_bps = 2
 optimization_iterations = 30
 dry_run = false
 
@@ -37,18 +37,23 @@ min = 1000000000000000
 max = 5000000000000000000
 
 [gate]
-min_profit_usd = 0.001
-safety_margin_bps = 0
-stable_pool_extra_margin_bps = 0
+min_profit_usd = 0.50
+safety_margin_bps = 10
+stable_pool_extra_margin_bps = 5
 
 [submission]
 puissant_url    = "https://puissant-builder.48.club/"
 blockrazor_url  = "https://bsc.blockrazor.xyz"
 jetbldr_url     = "https://rpc.bsc-virginia.jetbldr.xyz"
 nodereal_url    = "https://bsc-mainnet-builder.nodereal.io"
-blink_url       = "${BLINK_BSC_URL}"
+blink_url       = ""
+# Warp (Chainstack Trader) fires ONLY when projected profit exceeds this threshold.
+# Each call costs $0.15 — keep this high.
 warp_threshold_usd = 50.0
-direct_fallback = true
+# Hard cap per runner session. Bot will terminate cleanly when reached.
+warp_budget_usd    = 5.0
+# DirectSubmitter uses the FREE Growth endpoint. Safe to enable, but skips MEV protection.
+direct_fallback = false
 
 [token_usd_prices]
 USDT = 1.0

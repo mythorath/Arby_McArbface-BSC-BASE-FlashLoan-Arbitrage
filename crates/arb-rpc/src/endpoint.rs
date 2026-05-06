@@ -193,7 +193,11 @@ impl Endpoint {
     }
 
     /// Send raw transaction via the TRADER endpoint (costs $0.15/call on Chainstack Trader).
-    /// Falls back to read endpoint if no trader is configured.
+    /// Falls back to read endpoint only if no trader is configured.
+    ///
+    /// IMPORTANT: Only call this from `WarpSubmitter`. Every call to this function
+    /// that reaches a real Trader endpoint costs $0.15 — this is tracked in metrics.
+    /// Use `send_raw_tx_free()` for all other submission venues.
     pub async fn send_raw_tx(&self, raw_tx: Bytes) -> Result<alloy_primitives::B256> {
         let provider = self.trader_provider.as_ref().unwrap_or(&self.read_provider);
         let label = if self.trader_provider.is_some() { "trader" } else { "read" };
@@ -202,12 +206,40 @@ impl Endpoint {
         let pending = provider.send_raw_transaction(&raw_tx).await?;
         let elapsed = start.elapsed();
 
+        if self.trader_provider.is_some() {
+            warn!(
+                chain_id = self.chain_id,
+                latency_ms = elapsed.as_millis(),
+                tx_hash = %pending.tx_hash(),
+                "PAID Warp tx sent ($0.15)"
+            );
+        } else {
+            info!(
+                chain_id = self.chain_id,
+                endpoint = label,
+                latency_ms = elapsed.as_millis(),
+                tx_hash = %pending.tx_hash(),
+                "Transaction sent"
+            );
+        }
+
+        Ok(*pending.tx_hash())
+    }
+
+    /// Send raw transaction via the FREE read endpoint ONLY.
+    /// Never touches the Trader endpoint regardless of configuration.
+    /// Use this for DirectSubmitter and any other "free" venue.
+    pub async fn send_raw_tx_free(&self, raw_tx: Bytes) -> Result<alloy_primitives::B256> {
+        let start = Instant::now();
+        let pending = self.read_provider.send_raw_transaction(&raw_tx).await?;
+        let elapsed = start.elapsed();
+
         info!(
             chain_id = self.chain_id,
-            endpoint = label,
+            endpoint = "read",
             latency_ms = elapsed.as_millis(),
             tx_hash = %pending.tx_hash(),
-            "Transaction sent"
+            "Transaction sent (free endpoint)"
         );
 
         Ok(*pending.tx_hash())

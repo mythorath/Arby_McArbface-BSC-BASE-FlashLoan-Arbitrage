@@ -41,7 +41,8 @@ impl Submitter for DirectSubmitter {
         }
 
         let raw_tx = alloy_primitives::Bytes::from(bundle.signed_txs[0].clone());
-        match self.endpoint.send_raw_tx(raw_tx).await {
+        // send_raw_tx_free() routes through the Growth read endpoint, never the Trader/Warp endpoint.
+        match self.endpoint.send_raw_tx_free(raw_tx).await {
             Ok(tx_hash) => {
                 debug!(venue = "Direct", tx_hash = %tx_hash, "Transaction submitted");
                 Ok(SubmitResult {

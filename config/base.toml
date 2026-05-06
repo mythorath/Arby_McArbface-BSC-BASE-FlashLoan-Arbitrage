@@ -38,8 +38,13 @@ stable_pool_extra_margin_bps = 0
 
 [submission]
 blink_url       = "${BLINK_BASE_URL}"
+# Warp (Chainstack Trader) fires ONLY when projected profit exceeds this threshold.
+# Each call costs $0.15 — keep this high.
 warp_threshold_usd = 50.0
-direct_fallback = true
+# Hard cap per runner session. Bot will terminate cleanly when reached.
+warp_budget_usd    = 5.0
+# DirectSubmitter uses the FREE Growth endpoint. Safe to enable, but skips MEV protection.
+direct_fallback = false
 
 [token_usd_prices]
 WETH = 2500.0

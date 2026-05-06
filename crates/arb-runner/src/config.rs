@@ -60,14 +60,24 @@ pub struct SubmissionConfig {
     pub jetbldr_url: Option<String>,
     pub nodereal_url: Option<String>,
     pub blink_url: Option<String>,
+    /// Minimum projected USD profit before using the paid Warp/Trader endpoint.
+    /// Set high — every Warp call costs $0.15. Default is $50 if omitted.
     #[serde(default = "default_warp_threshold")]
     pub warp_threshold_usd: f64,
-    #[serde(default = "default_true")]
+    /// Hard cap on Warp spend per runner session (USD). Bot will stop when exceeded.
+    /// Default is $5.00. Override in config to suit your risk tolerance.
+    #[serde(default = "default_warp_budget")]
+    pub warp_budget_usd: f64,
+    /// Enable the direct Growth-RPC fallback submitter.
+    /// Defaults to FALSE — enabling this is safe (it uses the free endpoint),
+    /// but it sends txs unprotected (no MEV/backrun protection).
+    #[serde(default = "default_false")]
     pub direct_fallback: bool,
 }
 
-fn default_warp_threshold() -> f64 { 1.50 }
-fn default_true() -> bool { true }
+fn default_warp_threshold() -> f64 { 50.0 }
+fn default_warp_budget() -> f64 { 5.0 }
+fn default_false() -> bool { false }
 fn default_min_profit_usd() -> f64 { 0.50 }
 fn default_safety_margin_bps() -> u32 { 30 }
 fn default_stable_extra_margin() -> u32 { 50 }

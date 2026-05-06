@@ -554,6 +554,13 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
     info!(min_bps = cfg.scanner.min_profit_bps, min_usd = cfg.gate.min_profit_usd, "Profit gate initialized");
 
     let warp_threshold_usd = cfg.submission.warp_threshold_usd;
+    let warp_budget_usd = cfg.submission.warp_budget_usd;
+    let mut warp_spent_this_session: f64 = 0.0;
+    info!(
+        threshold_usd = warp_threshold_usd,
+        budget_usd = warp_budget_usd,
+        "Warp spending limits loaded"
+    );
     let min_initial_bps = if smoke_test { 0 } else { cfg.scanner.min_initial_bps };
     let optimization_iterations = cfg.scanner.optimization_iterations;
     let wallet_addr = signer.address();
@@ -717,7 +724,20 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
                         Ok(bundle) => {
                             endpoint.bump_nonce();
                             circuit_breaker.record_submit(best.path_id);
-                            let use_high_ev = effective_usd >= warp_threshold_usd;
+                            let budget_ok = warp_spent_this_session < warp_budget_usd;
+                            let use_high_ev = budget_ok && effective_usd >= warp_threshold_usd;
+                            if !budget_ok {
+                                error!(
+                                    spent = format!("{:.2}", warp_spent_this_session),
+                                    budget = warp_budget_usd,
+                                    "WARP BUDGET EXCEEDED — shutting down to prevent further charges"
+                                );
+                                return Err(anyhow::anyhow!(
+                                    "Warp session budget of ${:.2} exceeded (spent ${:.2}). \
+                                     Restart the bot to reset. Increase [submission].warp_budget_usd if intentional.",
+                                    warp_budget_usd, warp_spent_this_session
+                                ));
+                            }
                             let futures: Vec<_> = submitters.iter()
                                 .filter(|s| s.tier() == SubmitTier::AlwaysOn || (s.tier() == SubmitTier::HighEvOnly && use_high_ev))
                                 .map(|s| {
@@ -764,6 +784,18 @@ pub async fn run(cfg: AppConfig, smoke_test: bool) -> Result<()> {
 
                             if builder_sim_rejected {
                                 circuit_breaker.record_revert(best.path_id, block_number);
+                            }
+
+                            // Keep the session Warp spend in sync with the metric
+                            if use_high_ev {
+                                warp_spent_this_session += 0.15;
+                                if warp_spent_this_session >= warp_budget_usd * 0.8 {
+                                    warn!(
+                                        spent = format!("{:.2}", warp_spent_this_session),
+                                        budget = warp_budget_usd,
+                                        "Warp spend at 80% of session budget"
+                                    );
+                                }
                             }
 
                             // Track receipt — sync in smoke test, async otherwise
