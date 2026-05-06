@@ -1,4 +1,4 @@
-# arbv2 — Cross-DEX Flash-Loan Arbitrage Bot (BSC + Base)
+# Arby McArbface — Cross-DEX Flash-Loan Arbitrage Bot (BSC + Base)
 
 A from-scratch Rust rewrite of a multi-protocol DEX arbitrage scanner. Single-binary,
 in-process AMM math, mempool backrunning, and tiered MEV bundle submission across
