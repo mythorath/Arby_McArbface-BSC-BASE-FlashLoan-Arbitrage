@@ -1,0 +1,13 @@
+[package]
+name = "arb-sim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arb-core = { workspace = true }
+arb-paths = { workspace = true }
+arb-state = { workspace = true }
+alloy-primitives = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+rayon = { workspace = true }

@@ -1,0 +1,225 @@
+[chain]
+chain_id = 56
+name = "BSC"
+rpc_https = "${BSC_RPC_URL}"
+rpc_wss = "${BSC_WSS_URL}"
+trader_rpc = "${BSC_TRADER_NODE}"   # Warp-enabled, $0.15/call — ONLY for tx submission
+arb_contract = "${BSC_ARB_CONTRACT}"
+state_reader = "${BSC_STATE_READER}"
+block_time_ms = 3000
+scan_budget_ms = 800
+
+[wallet]
+private_key_env = "PRIVATE_KEY"
+
+[scanner]
+flash_tokens = ["USDT", "USDC", "WBNB"]
+min_profit_bps = 0
+min_initial_bps = 0
+optimization_iterations = 30
+dry_run = false
+
+[scanner.flash_amounts]
+USDT = 5000000                # 5 USDT (6 dec) — known to find candidates
+USDC = 5000000                # 5 USDC
+WBNB = 10000000000000000      # 0.01 WBNB (~$6)
+
+[scanner.flash_bounds.USDT]
+min = 1000000
+max = 50000000000
+
+[scanner.flash_bounds.USDC]
+min = 1000000
+max = 50000000000
+
+[scanner.flash_bounds.WBNB]
+min = 1000000000000000
+max = 5000000000000000000
+
+[gate]
+min_profit_usd = 0.001
+safety_margin_bps = 0
+stable_pool_extra_margin_bps = 0
+
+[submission]
+puissant_url    = "https://puissant-builder.48.club/"
+blockrazor_url  = "https://bsc.blockrazor.xyz"
+jetbldr_url     = "https://rpc.bsc-virginia.jetbldr.xyz"
+nodereal_url    = "https://bsc-mainnet-builder.nodereal.io"
+blink_url       = "${BLINK_BSC_URL}"
+warp_threshold_usd = 50.0
+direct_fallback = true
+
+[token_usd_prices]
+USDT = 1.0
+USDC = 1.0
+WBNB = 600.0
+ETH = 2500.0
+BTCB = 95000.0
+BUSD = 1.0
+
+[tokens]
+USDT = "0x55d398326f99059fF775485246999027B3197955"
+USDC = "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d"
+WBNB = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
+ETH  = "0x2170Ed0880ac9A755fd29B2688956BD959F933F8"
+BTCB = "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c"
+BUSD = "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56"
+
+# === V2 Pools (PancakeSwap V2 + BiSwap) ===
+
+[[pools]]
+name = "PCS_USDT_WBNB"
+address = "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"
+protocol = "v2"
+token0 = "USDT"
+token1 = "WBNB"
+fee_bps = 25
+
+[[pools]]
+name = "PCS_USDC_USDT"
+address = "0xEc6557348085Aa57C72514D67070dC863C0a5A8c"
+protocol = "v2"
+token0 = "USDC"
+token1 = "USDT"
+fee_bps = 25
+
+[[pools]]
+name = "PCS_ETH_USDT"
+address = "0x531FEbfeb9a61D948c384ACFBe6dCc51057AEa7e"
+protocol = "v2"
+token0 = "ETH"
+token1 = "USDT"
+fee_bps = 25
+
+[[pools]]
+name = "PCS_BTCB_USDT"
+address = "0x3F803EC2b816Ea7F06EC76aA2B6f2532F9892d62"
+protocol = "v2"
+token0 = "BTCB"
+token1 = "USDT"
+fee_bps = 25
+
+[[pools]]
+name = "PCS_USDC_WBNB"
+address = "0xd99c7F6C65857AC913a8f880A4cb84032AB2FC5b"
+protocol = "v2"
+token0 = "USDC"
+token1 = "WBNB"
+fee_bps = 25
+
+[[pools]]
+name = "BS_USDT_WBNB"
+address = "0x8840C6252e2e86e545deFb6da98B2a0E26d8C1BA"
+protocol = "v2"
+token0 = "USDT"
+token1 = "WBNB"
+fee_bps = 10
+
+[[pools]]
+name = "BS_USDC_USDT"
+address = "0x1483767E665B3591677Fd49F724bf7430C18Bf83"
+protocol = "v2"
+token0 = "USDC"
+token1 = "USDT"
+fee_bps = 10
+
+[[pools]]
+name = "BS_ETH_USDT"
+address = "0x63b30de1A998e9E64FD58A21F68D323B9BcD8F85"
+protocol = "v2"
+token0 = "ETH"
+token1 = "USDT"
+fee_bps = 10
+
+# === V3 Pools (Uniswap V3 + PancakeSwap V3) ===
+
+[[pools]]
+name = "U_USDT_WBNB_500"
+address = "0x6fe9E9de56356F7eDBfcBB29FAB7cd69471a4869"
+protocol = "v3"
+token0 = "USDT"
+token1 = "WBNB"
+fee_bps = 5
+
+[[pools]]
+name = "U_USDC_USDT_100"
+address = "0x2C3c320D49019D4f9A92352e947c7e5AcFE47D68"
+protocol = "v3"
+token0 = "USDC"
+token1 = "USDT"
+fee_bps = 1
+
+[[pools]]
+name = "U_ETH_USDT_500"
+address = "0xF9878a5Dd55Edc120Fde01893Ea713A4F032229c"
+protocol = "v3"
+token0 = "ETH"
+token1 = "USDT"
+fee_bps = 5
+
+[[pools]]
+name = "U_ETH_WBNB_500"
+address = "0x0F338Ec12d3f7c3D77a4b9FcC1F95f3FB6AD0ea6"
+protocol = "v3"
+token0 = "ETH"
+token1 = "WBNB"
+fee_bps = 5
+
+[[pools]]
+name = "P_USDT_WBNB_500"
+address = "0x36696169C63e42cd08ce11f5deeBbCeBae652050"
+protocol = "v3"
+token0 = "USDT"
+token1 = "WBNB"
+fee_bps = 5
+
+[[pools]]
+name = "P_USDC_USDT_100"
+address = "0x92b7807bF19b7DDdf89b706143896d05228f3121"
+protocol = "v3"
+token0 = "USDC"
+token1 = "USDT"
+fee_bps = 1
+
+[[pools]]
+name = "P_ETH_USDT_500"
+address = "0xBe141893E4c6AD9272e8C04BAB7E6a10604501a5"
+protocol = "v3"
+token0 = "ETH"
+token1 = "USDT"
+fee_bps = 5
+
+[[pools]]
+name = "P_ETH_WBNB_500"
+address = "0xD0e226f674bBf064f54aB47F42473fF80DB98CBA"
+protocol = "v3"
+token0 = "ETH"
+token1 = "WBNB"
+fee_bps = 5
+
+# === Thena Fusion / Algebra ===
+
+[[pools]]
+name = "THE_USDT_USDC"
+address = "0x1b9a1120a17617d8ec4dc80b921a9a1c50caef7d"
+protocol = "algebra"
+token0 = "USDT"
+token1 = "USDC"
+fee_bps = 1
+
+[[pools]]
+name = "THE_USDT_WBNB"
+address = "0xd405b976ac01023c9064024880999fc450a8668b"
+protocol = "algebra"
+token0 = "USDT"
+token1 = "WBNB"
+fee_bps = 5
+
+[[pools]]
+name = "THE_ETH_WBNB"
+address = "0x1123e75b71019962cd4d21b0f3018a6412edb63c"
+protocol = "algebra"
+token0 = "ETH"
+token1 = "WBNB"
+fee_bps = 5

@@ -1,0 +1,308 @@
+[chain]
+chain_id = 8453
+name = "Base"
+rpc_https = "${BASE_RPC_URL}"
+rpc_wss = "${BASE_WSS_URL}"
+trader_rpc = "${BASE_TRADER_NODE}"   # Standard Trader node, $0.15/call — ONLY for tx submission
+arb_contract = "${BASE_ARB_CONTRACT}"
+state_reader = "${BASE_STATE_READER}"
+block_time_ms = 2000
+scan_budget_ms = 500
+
+[wallet]
+private_key_env = "PRIVATE_KEY"
+
+[scanner]
+flash_tokens = ["USDC", "WETH"]
+min_profit_bps = 0
+min_initial_bps = 0
+optimization_iterations = 30
+dry_run = false
+
+[scanner.flash_amounts]
+USDC = 5000000                # 5 USDC (6 dec) — known to find candidates
+WETH = 2000000000000000       # 0.002 ETH (~$5)
+
+[scanner.flash_bounds.USDC]
+min = 1000000
+max = 50000000000
+
+[scanner.flash_bounds.WETH]
+min = 1000000000000000
+max = 5000000000000000000
+
+[gate]
+min_profit_usd = 0.001
+safety_margin_bps = 0
+stable_pool_extra_margin_bps = 0
+
+[submission]
+blink_url       = "${BLINK_BASE_URL}"
+warp_threshold_usd = 50.0
+direct_fallback = true
+
+[token_usd_prices]
+WETH = 2500.0
+USDC = 1.0
+USDbC = 1.0
+DAI = 1.0
+cbETH = 2700.0
+AERO = 1.20
+cbBTC = 95000.0
+
+[tokens]
+WETH  = "0x4200000000000000000000000000000000000006"
+USDbC = "0xd9AAec86b65D86f6a7b5B1b0c42fFA531710b6Aa"
+USDC  = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+DAI   = "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"
+cbETH = "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22"
+AERO  = "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
+cbBTC = "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"
+
+# === Aerodrome V2 Volatile Pools (verified from factory) ===
+
+[[pools]]
+name = "AERO_WETH_USDC_VOL"
+address = "0xcDAC0d6c6C59727a65F871236188350531885C43"
+protocol = "aero_v2"
+token0 = "WETH"
+token1 = "USDC"
+fee_bps = 30
+
+[[pools]]
+name = "AERO_WETH_cbETH_VOL"
+address = "0x44Ecc644449fC3a9858d2007CaA8CFAa4C561f91"
+protocol = "aero_v2"
+token0 = "WETH"
+token1 = "cbETH"
+fee_bps = 30
+
+[[pools]]
+name = "AERO_WETH_AERO_VOL"
+address = "0x7f670f78B17dEC44d5Ef68a48740b6f8849cc2e6"
+protocol = "aero_v2"
+token0 = "WETH"
+token1 = "AERO"
+fee_bps = 100
+
+[[pools]]
+name = "AERO_USDC_AERO_VOL"
+address = "0x6cDcb1C4A4D1C3C6d054b27AC5B77e89eAFb971d"
+protocol = "aero_v2"
+token0 = "USDC"
+token1 = "AERO"
+fee_bps = 30
+
+[[pools]]
+name = "AERO_USDC_DAI_VOL"
+address = "0x4f5f4B7381b2445937dab831Fc1952eCBB834e53"
+protocol = "aero_v2"
+token0 = "USDC"
+token1 = "DAI"
+fee_bps = 30
+
+# === Aerodrome V2 Stable Pools ===
+
+[[pools]]
+name = "AERO_USDC_DAI_STABLE"
+address = "0x67b00B46FA4f4F24c03855c5C8013C0B938B3eEc"
+protocol = "aero_v2"
+token0 = "USDC"
+token1 = "DAI"
+fee_bps = 5
+
+[[pools]]
+name = "AERO_WETH_cbETH_STABLE"
+address = "0x9E8bfEB5c73F3f897BebdB49CC4161FecE0B0c55"
+protocol = "aero_v2"
+token0 = "WETH"
+token1 = "cbETH"
+fee_bps = 5
+
+# === Uniswap V3 on Base (verified on-chain) ===
+
+[[pools]]
+name = "UNI_WETH_USDC_500"
+address = "0xd0b53D9277642d899DF5C87A3966A349A798F224"
+protocol = "v3"
+token0 = "WETH"
+token1 = "USDC"
+fee_bps = 5
+
+[[pools]]
+name = "UNI_cbETH_WETH_500"
+address = "0x257fcbae4Ac6B26A02E4FC5e1a11e4174b5ce395"
+protocol = "v3"
+token0 = "cbETH"
+token1 = "WETH"
+fee_bps = 5
+
+# === Aerodrome Slipstream (concentrated, slot0-based, factory 0x5e7BB1...) ===
+
+[[pools]]
+name = "SLIP_WETH_USDC_100"
+address = "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59"
+protocol = "aero_slipstream"
+token0 = "WETH"
+token1 = "USDC"
+fee_bps = 7
+
+[[pools]]
+name = "SLIP_WETH_USDC_200"
+address = "0x148BC43946a902258916e580B0e6D92Aaa74746F"
+protocol = "aero_slipstream"
+token0 = "WETH"
+token1 = "USDC"
+fee_bps = 30
+
+[[pools]]
+name = "SLIP_WETH_AERO_200"
+address = "0x82321f3BEB69f503380D6B233857d5C43562e2D0"
+protocol = "aero_slipstream"
+token0 = "WETH"
+token1 = "AERO"
+fee_bps = 31
+
+[[pools]]
+name = "SLIP_WETH_cbETH_1"
+address = "0x47cA96Ea59C13F72745928887f84C9F52C3d7348"
+protocol = "aero_slipstream"
+token0 = "WETH"
+token1 = "cbETH"
+fee_bps = 1
+
+[[pools]]
+name = "SLIP_USDC_AERO_200"
+address = "0xCCd9cC53b63662088c738B8BC06E9078Fb8D9ad4"
+protocol = "aero_slipstream"
+token0 = "USDC"
+token1 = "AERO"
+fee_bps = 30
+
+# === SushiSwap V3 on Base ===
+
+[[pools]]
+name = "SUSHI_WETH_USDC_500"
+address = "0x57713F7716e0b0F65ec116912F834E49805480d2"
+protocol = "v3"
+token0 = "WETH"
+token1 = "USDC"
+fee_bps = 5
+
+[[pools]]
+name = "SUSHI_WETH_cbETH_500"
+address = "0xb81B9Aef36c76d740850C31C45697c83468DCB54"
+protocol = "v3"
+token0 = "WETH"
+token1 = "cbETH"
+fee_bps = 5
+
+# === BaseSwap V2 on Base ===
+
+[[pools]]
+name = "BSWAP_WETH_USDC"
+address = "0xab067c01C7F5734da168C699Ae9d23a4512c9FdB"
+protocol = "v2"
+token0 = "WETH"
+token1 = "USDC"
+fee_bps = 25
+
+[[pools]]
+name = "BSWAP_WETH_cbETH"
+address = "0x07CFA5Df24fB17486AF0CBf6C910F24253a674D3"
+protocol = "v2"
+token0 = "WETH"
+token1 = "cbETH"
+fee_bps = 25
+
+# === PancakeSwap V3 on Base ===
+
+[[pools]]
+name = "PCS3_WETH_USDC_500"
+address = "0xB775272E537cc670C65DC852908aD47015244EaF"
+protocol = "v3"
+token0 = "WETH"
+token1 = "USDC"
+fee_bps = 5
+
+[[pools]]
+name = "PCS3_WETH_USDC_100"
+address = "0x72AB388E2E2F6FaceF59E3C3FA2C4E29011c2D38"
+protocol = "v3"
+token0 = "WETH"
+token1 = "USDC"
+fee_bps = 1
+
+# === Aerodrome Volatile cbBTC Pools (verified on-chain) ===
+
+[[pools]]
+name = "AERO_WETH_cbBTC_VOL"
+address = "0x2578365B3dfA7FfE60108e181EFb79FeDdec2319"
+protocol = "aero_v2"
+token0 = "WETH"
+token1 = "cbBTC"
+fee_bps = 30
+
+# === Aerodrome Slipstream additional tiers ===
+
+[[pools]]
+name = "SLIP_WETH_USDC_2000"
+address = "0x0652202C4b2D09CB93aEDeFAdc14B36869483a98"
+protocol = "aero_slipstream"
+token0 = "WETH"
+token1 = "USDC"
+fee_bps = 100
+
+# === Uniswap V3 additional tiers ===
+
+[[pools]]
+name = "UNI_WETH_USDC_3000"
+address = "0x6c561B446416E1A00E8E93E221854d6eA4171372"
+protocol = "v3"
+token0 = "WETH"
+token1 = "USDC"
+fee_bps = 30
+
+[[pools]]
+name = "UNI_WETH_USDC_100"
+address = "0xb4CB800910B228ED3d0834cF79D697127BBB00e5"
+protocol = "v3"
+token0 = "WETH"
+token1 = "USDC"
+fee_bps = 1
+
+[[pools]]
+name = "UNI_WETH_cbBTC_3000"
+address = "0x8c7080564B5A792A33Ef2FD473fbA6364d5495e5"
+protocol = "v3"
+token0 = "WETH"
+token1 = "cbBTC"
+fee_bps = 30
+
+[[pools]]
+name = "UNI_cbETH_WETH_500"
+address = "0x10648BA41B8565907Cfa1496765fA4D95390aa0d"
+protocol = "v3"
+token0 = "cbETH"
+token1 = "WETH"
+fee_bps = 5
+
+# === PancakeSwap V3 cbBTC ===
+
+[[pools]]
+name = "PCS3_WETH_cbBTC_500"
+address = "0xd974D59e30054cf1aBedeD0C9947B0D8Baf90029"
+protocol = "v3"
+token0 = "WETH"
+token1 = "cbBTC"
+fee_bps = 5
+
+# === SushiSwap V3 cbBTC (thin liquidity but adds path diversity) ===
+
+[[pools]]
+name = "SUSHI_WETH_cbBTC_3000"
+address = "0x99Dc44b6b406491Cad1Dd60AaF8992c498D4d5ba"
+protocol = "v3"
+token0 = "WETH"
+token1 = "cbBTC"
+fee_bps = 30

@@ -1,0 +1,40 @@
+[package]
+name = "arb-runner"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "arb-runner"
+path = "src/main.rs"
+
+[[bin]]
+name = "validate-pools"
+path = "src/bin/validate_pools.rs"
+
+[dependencies]
+arb-core = { workspace = true }
+arb-state = { workspace = true }
+arb-paths = { workspace = true }
+arb-sim = { workspace = true }
+arb-submit = { workspace = true }
+arb-mempool = { workspace = true }
+arb-rpc = { workspace = true }
+alloy = { workspace = true }
+alloy-primitives = { workspace = true }
+alloy-rpc-types = { workspace = true }
+alloy-provider = { workspace = true }
+alloy-transport-ws = { workspace = true }
+alloy-signer-local = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }
+prometheus = { workspace = true }
+dashmap = { workspace = true }
+lazy_static = "1"
+axum = "0.7"
+chrono = "0.4"

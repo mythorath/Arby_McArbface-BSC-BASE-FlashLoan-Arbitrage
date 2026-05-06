@@ -1,0 +1,23 @@
+[package]
+name = "arb-submit"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arb-core = { workspace = true }
+arb-rpc = { workspace = true }
+arb-paths = { workspace = true }
+alloy = { workspace = true }
+alloy-primitives = { workspace = true }
+alloy-sol-types = { workspace = true }
+alloy-network = { workspace = true }
+alloy-signer-local = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+async-trait = "0.1"
