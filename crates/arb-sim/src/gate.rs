@@ -87,8 +87,7 @@ impl ProfitGate {
             .get(&result.flash_token)
             .copied()
             .unwrap_or_else(|| {
-                // Fallback heuristic for tokens not in registry
-                if result.flash_amount > U256::from(1_000_000_000_000_000u64) { 18 } else { 6 }
+                if result.flash_amount >= U256::from(1_000_000_000_000u64) { 18 } else { 6 }
             });
         let decimals_factor = 10f64.powi(decimals as i32);
 
@@ -115,5 +114,155 @@ impl ProfitGate {
             effective_profit_usd,
             reject_reason: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{address, U256};
+    use arb_paths::{HopTemplate, PathTemplate};
+
+    fn make_gate(
+        min_bps: u32,
+        min_usd: f64,
+        safety_bps: u32,
+        stable_extra_bps: u32,
+        prices: Vec<(Address, f64)>,
+        decimals: Vec<(Address, u32)>,
+    ) -> ProfitGate {
+        ProfitGate::new(
+            min_bps,
+            min_usd,
+            safety_bps,
+            stable_extra_bps,
+            prices.into_iter().collect(),
+            decimals.into_iter().collect(),
+        )
+    }
+
+    fn make_result(flash_token: Address, flash_amount: U256, gross_profit: U256, profit_bps: u32) -> SimResult {
+        SimResult {
+            path_id: 1,
+            flash_token,
+            flash_amount,
+            final_amount: flash_amount + gross_profit,
+            gross_profit,
+            profit_bps,
+        }
+    }
+
+    fn simple_path(protocol: Protocol) -> PathTemplate {
+        let token_a = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let token_b = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        PathTemplate {
+            id: 1,
+            flash_token: token_a,
+            flash_amount: U256::from(1_000_000_000_000_000_000u64),
+            hops: vec![
+                HopTemplate {
+                    protocol,
+                    pool: address!("1111111111111111111111111111111111111111"),
+                    token_in: token_a,
+                    token_out: token_b,
+                },
+                HopTemplate {
+                    protocol: Protocol::UniswapV2,
+                    pool: address!("2222222222222222222222222222222222222222"),
+                    token_in: token_b,
+                    token_out: token_a,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_explicit_decimals_used() {
+        let token = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let gate = make_gate(0, 0.0, 0, 0, vec![(token, 1.0)], vec![(token, 18)]);
+        let profit = U256::from(1_000_000_000_000_000_000u64);
+        let result = make_result(token, U256::from(100_000_000_000_000_000_000u128), profit, 100);
+        let path = simple_path(Protocol::UniswapV2);
+        let decision = gate.should_submit(&result, &path);
+        assert!(decision.accept);
+        let expected_usd = 1.0;
+        assert!((decision.effective_profit_usd - expected_usd).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_fallback_heuristic_large_amount() {
+        let token = address!("cccccccccccccccccccccccccccccccccccccccc");
+        let gate = make_gate(0, 0.0, 0, 0, vec![(token, 1.0)], vec![]);
+        let flash = U256::from(10_000_000_000_000_000u64);
+        let profit = U256::from(1_000_000_000_000_000_000u64);
+        let result = make_result(token, flash, profit, 100);
+        let path = simple_path(Protocol::UniswapV2);
+        let decision = gate.should_submit(&result, &path);
+        assert!(decision.accept);
+        let expected_usd = 1.0;
+        assert!((decision.effective_profit_usd - expected_usd).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_fallback_heuristic_small_amount() {
+        let token = address!("cccccccccccccccccccccccccccccccccccccccc");
+        let gate = make_gate(0, 0.0, 0, 0, vec![(token, 1.0)], vec![]);
+        let flash = U256::from(500_000u64);
+        let profit = U256::from(1_000_000u64);
+        let result = make_result(token, flash, profit, 100);
+        let path = simple_path(Protocol::UniswapV2);
+        let decision = gate.should_submit(&result, &path);
+        assert!(decision.accept);
+        let expected_usd = 1.0;
+        assert!((decision.effective_profit_usd - expected_usd).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_below_min_bps_rejected() {
+        let token = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let gate = make_gate(50, 0.0, 0, 0, vec![(token, 1.0)], vec![(token, 18)]);
+        let result = make_result(token, U256::from(1_000_000_000_000_000_000u64), U256::from(1u64), 30);
+        let path = simple_path(Protocol::UniswapV2);
+        let decision = gate.should_submit(&result, &path);
+        assert!(!decision.accept);
+        assert_eq!(decision.reject_reason, Some("below_min_bps"));
+    }
+
+    #[test]
+    fn test_below_safety_margin_rejected() {
+        let token = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let gate = make_gate(10, 0.0, 20, 0, vec![(token, 1.0)], vec![(token, 18)]);
+        let result = make_result(token, U256::from(1_000_000_000_000_000_000u64), U256::from(1u64), 20);
+        let path = simple_path(Protocol::UniswapV2);
+        let decision = gate.should_submit(&result, &path);
+        assert!(!decision.accept);
+        assert_eq!(decision.reject_reason, Some("below_safety_margin"));
+    }
+
+    #[test]
+    fn test_above_min_usd_accepted() {
+        let token = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let gate = make_gate(10, 0.50, 5, 0, vec![(token, 300.0)], vec![(token, 18)]);
+        let profit = U256::from(10_000_000_000_000_000u64);
+        let result = make_result(token, U256::from(1_000_000_000_000_000_000u64), profit, 100);
+        let path = simple_path(Protocol::UniswapV2);
+        let decision = gate.should_submit(&result, &path);
+        assert!(decision.accept);
+        assert!(decision.effective_profit_usd > 0.50);
+    }
+
+    #[test]
+    fn test_stable_pool_extra_margin() {
+        let token = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let gate = make_gate(10, 0.0, 5, 30, vec![(token, 1.0)], vec![(token, 18)]);
+        let result = make_result(token, U256::from(1_000_000_000_000_000_000u64), U256::from(1u64), 25);
+        let path = simple_path(Protocol::PancakeStable);
+        let decision = gate.should_submit(&result, &path);
+        assert!(!decision.accept);
+        assert_eq!(decision.reject_reason, Some("below_safety_margin"));
+
+        let path_no_stable = simple_path(Protocol::UniswapV2);
+        let decision2 = gate.should_submit(&result, &path_no_stable);
+        assert!(decision2.accept);
     }
 }

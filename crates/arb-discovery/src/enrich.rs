@@ -15,7 +15,7 @@ pub struct EnrichConfig {
 fn parse_tax_bps(s: &Option<String>) -> u32 {
     s.as_ref()
         .and_then(|v| v.parse::<f64>().ok())
-        .map(|pct| (pct * 100.0) as u32) // CMC returns as percentage like "5" = 5%
+        .map(|pct| (pct.max(0.0) * 100.0) as u32)
         .unwrap_or(0)
 }
 
@@ -160,20 +160,16 @@ pub async fn enrich_candidate(
 
 fn exchange_to_protocol(exchange: &str) -> String {
     let lower = exchange.to_lowercase();
-    if lower.contains("v3") || lower.contains("slipstream") {
-        if lower.contains("slipstream") || lower.contains("aerodrome cl") {
-            "aero_slipstream".to_string()
-        } else {
-            "v3".to_string()
-        }
-    } else if lower.contains("v2") || lower.contains("swap") {
-        if lower.contains("aerodrome") || lower.contains("velodrome") {
-            "aero_v2".to_string()
-        } else {
-            "v2".to_string()
-        }
+    if lower.contains("slipstream") || lower.contains("aerodrome cl") {
+        "aero_slipstream".to_string()
+    } else if lower.contains("v3") {
+        "v3".to_string()
+    } else if lower.contains("aerodrome") || lower.contains("velodrome") {
+        "aero_v2".to_string()
     } else if lower.contains("algebra") || lower.contains("thena") {
         "algebra".to_string()
+    } else if lower.contains("v2") || lower.contains("swap") {
+        "v2".to_string()
     } else {
         "v2".to_string()
     }
@@ -181,13 +177,123 @@ fn exchange_to_protocol(exchange: &str) -> String {
 
 fn guess_fee_bps(exchange: &str) -> u32 {
     let lower = exchange.to_lowercase();
-    if lower.contains("v3") {
-        5 // most V3 pools are 500 fee tier = 5 bps
+    if lower.contains("v3") || lower.contains("slipstream") || lower.contains("algebra") {
+        30
     } else if lower.contains("biswap") {
         10
     } else if lower.contains("aerodrome") || lower.contains("velodrome") {
         30
     } else {
-        25 // PCS V2 default
+        25
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_tax_bps_whole_number() {
+        assert_eq!(parse_tax_bps(&Some("5".to_string())), 500);
+    }
+
+    #[test]
+    fn parse_tax_bps_zero() {
+        assert_eq!(parse_tax_bps(&Some("0".to_string())), 0);
+    }
+
+    #[test]
+    fn parse_tax_bps_fractional() {
+        assert_eq!(parse_tax_bps(&Some("0.5".to_string())), 50);
+    }
+
+    #[test]
+    fn parse_tax_bps_none() {
+        assert_eq!(parse_tax_bps(&None), 0);
+    }
+
+    #[test]
+    fn parse_tax_bps_invalid_string() {
+        assert_eq!(parse_tax_bps(&Some("not_a_number".to_string())), 0);
+    }
+
+    #[test]
+    fn parse_tax_bps_hundred_percent() {
+        assert_eq!(parse_tax_bps(&Some("100".to_string())), 10000);
+    }
+
+    #[test]
+    fn exchange_to_protocol_pancakeswap_v3() {
+        assert_eq!(exchange_to_protocol("PancakeSwap V3"), "v3");
+    }
+
+    #[test]
+    fn exchange_to_protocol_uniswap_v3() {
+        assert_eq!(exchange_to_protocol("Uniswap V3"), "v3");
+    }
+
+    #[test]
+    fn exchange_to_protocol_pancakeswap_v2() {
+        assert_eq!(exchange_to_protocol("PancakeSwap V2"), "v2");
+    }
+
+    #[test]
+    fn exchange_to_protocol_biswap() {
+        assert_eq!(exchange_to_protocol("BiSwap"), "v2");
+    }
+
+    #[test]
+    fn exchange_to_protocol_aerodrome_v2() {
+        assert_eq!(exchange_to_protocol("Aerodrome V2"), "aero_v2");
+    }
+
+    #[test]
+    fn exchange_to_protocol_velodrome_v2() {
+        assert_eq!(exchange_to_protocol("Velodrome V2"), "aero_v2");
+    }
+
+    #[test]
+    fn exchange_to_protocol_aerodrome_slipstream() {
+        assert_eq!(exchange_to_protocol("Aerodrome Slipstream"), "aero_slipstream");
+    }
+
+    #[test]
+    fn exchange_to_protocol_aerodrome_cl() {
+        assert_eq!(exchange_to_protocol("Aerodrome CL"), "aero_slipstream");
+    }
+
+    #[test]
+    fn exchange_to_protocol_thena_fusion() {
+        assert_eq!(exchange_to_protocol("Thena Fusion"), "algebra");
+    }
+
+    #[test]
+    fn exchange_to_protocol_unknown_dex() {
+        assert_eq!(exchange_to_protocol("SomeUnknownDex"), "v2");
+    }
+
+    #[test]
+    fn guess_fee_bps_v3() {
+        assert_eq!(guess_fee_bps("PancakeSwap V3"), 30);
+    }
+
+    #[test]
+    fn guess_fee_bps_biswap() {
+        assert_eq!(guess_fee_bps("BiSwap V2"), 10);
+    }
+
+    #[test]
+    fn guess_fee_bps_aerodrome() {
+        assert_eq!(guess_fee_bps("Aerodrome V2"), 30);
+    }
+
+    #[test]
+    fn guess_fee_bps_velodrome() {
+        assert_eq!(guess_fee_bps("Velodrome V2"), 30);
+    }
+
+    #[test]
+    fn guess_fee_bps_default() {
+        assert_eq!(guess_fee_bps("PancakeSwap V2"), 25);
     }
 }

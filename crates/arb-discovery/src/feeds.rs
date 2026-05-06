@@ -6,7 +6,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::cmc::{CmcClient, MemeTokenEntry, TokenLeaderboardEntry};
+use crate::cmc::{CmcClient, ListingEntry, MemeTokenEntry, TokenLeaderboardEntry};
 use crate::store::DiscoveredToken;
 
 /// A candidate token address discovered by one of the feeds.
@@ -54,7 +54,7 @@ fn leaderboard_to_token(entry: &TokenLeaderboardEntry, source: &str) -> Option<D
         address: addr.clone(),
         symbol: entry.sym.clone().unwrap_or_default(),
         name: entry.n.clone().unwrap_or_default(),
-        decimals: entry.dec.unwrap_or(18) as u32,
+        decimals: entry.dec.unwrap_or(18).max(0) as u32,
         price_usd: entry.p.as_ref().and_then(|s| s.parse().ok()).unwrap_or(0.0),
         market_cap_usd: entry.mcap.as_ref().and_then(|s| s.parse().ok()).unwrap_or(0.0),
         liquidity_usd: entry.liq_usd.as_ref().and_then(|s| s.parse().ok()).unwrap_or(0.0),
@@ -64,12 +64,12 @@ fn leaderboard_to_token(entry: &TokenLeaderboardEntry, source: &str) -> Option<D
         buy_tax_bps: 0,
         sell_tax_bps: 0,
         is_flagged: false,
-        holder_count: entry.hcnt.unwrap_or(0) as u64,
+        holder_count: entry.hcnt.unwrap_or(0).max(0) as u64,
         top_holder_rate: entry.thr.as_ref().and_then(|s| s.parse().ok()).unwrap_or(0.0),
         source: source.to_string(),
         first_seen: now.clone(),
         last_seen: now,
-        platform_id: entry.pcid.unwrap_or(0) as u32,
+        platform_id: entry.pcid.unwrap_or(0).max(0) as u32,
     })
 }
 
@@ -89,7 +89,7 @@ fn meme_to_token(entry: &MemeTokenEntry, source: &str) -> Option<DiscoveredToken
         address: addr.clone(),
         symbol: entry.sym.clone().unwrap_or_default(),
         name: entry.n.clone().unwrap_or_default(),
-        decimals: entry.dec.unwrap_or(18) as u32,
+        decimals: entry.dec.unwrap_or(18).max(0) as u32,
         price_usd: parse_f64(&entry.p),
         market_cap_usd: parse_f64(&entry.mcap),
         liquidity_usd: parse_f64(&entry.liq),
@@ -99,12 +99,51 @@ fn meme_to_token(entry: &MemeTokenEntry, source: &str) -> Option<DiscoveredToken
         buy_tax_bps: 0,
         sell_tax_bps: 0,
         is_flagged: false,
-        holder_count: entry.h.unwrap_or(0) as u64,
+        holder_count: entry.h.unwrap_or(0).max(0) as u64,
         top_holder_rate: entry.htp.unwrap_or(0.0),
         source: source.to_string(),
         first_seen: now.clone(),
         last_seen: now,
-        platform_id: entry.plt.unwrap_or(0) as u32,
+        platform_id: entry.plt.unwrap_or(0).max(0) as u32,
+    })
+}
+
+fn listing_to_token(entry: &ListingEntry, chain_filter: &str, source: &str) -> Option<DiscoveredToken> {
+    let plat = entry.platform.as_ref()?;
+    let chain_name = plat.name.as_deref().unwrap_or("");
+    let matches_chain = match chain_filter {
+        "BSC" | "bsc" => chain_name.contains("BNB"),
+        "Base" | "base" => chain_name.contains("Base"),
+        _ => false,
+    };
+    if !matches_chain { return None; }
+    let addr = plat.token_address.as_ref()?;
+    if addr.is_empty() { return None; }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let quote = entry.quote.as_ref()
+        .and_then(|q| q.get("USD"));
+
+    Some(DiscoveredToken {
+        address: addr.clone(),
+        symbol: entry.symbol.clone().unwrap_or_default(),
+        name: entry.name.clone().unwrap_or_default(),
+        decimals: 18,
+        price_usd: quote.and_then(|q| q.price).unwrap_or(0.0),
+        market_cap_usd: quote.and_then(|q| q.market_cap).unwrap_or(0.0),
+        liquidity_usd: 0.0,
+        volume_24h_usd: quote.and_then(|q| q.volume_24h).unwrap_or(0.0),
+        security_level: String::new(),
+        honeypot_status: String::new(),
+        buy_tax_bps: 0,
+        sell_tax_bps: 0,
+        is_flagged: false,
+        holder_count: 0,
+        top_holder_rate: 0.0,
+        source: source.to_string(),
+        first_seen: now.clone(),
+        last_seen: now,
+        platform_id: 0,
     })
 }
 
@@ -114,6 +153,7 @@ pub struct FeedConfig {
     pub gainer_loser_interval: Duration,
     pub min_liquidity_usd: f64,
     pub max_age_minutes: u32,
+    pub use_standard_api: bool,
 }
 
 impl Default for FeedConfig {
@@ -124,6 +164,7 @@ impl Default for FeedConfig {
             gainer_loser_interval: Duration::from_secs(600),
             min_liquidity_usd: 25_000.0,
             max_age_minutes: 7 * 24 * 60,
+            use_standard_api: false,
         }
     }
 }
@@ -137,6 +178,7 @@ pub async fn run_feeds(
     tx: mpsc::Sender<FeedCandidate>,
 ) -> Result<()> {
     let mut seen: HashSet<String> = HashSet::new();
+    const MAX_SEEN: usize = 100_000;
     let mut new_tick = tokio::time::interval(feed_cfg.new_list_interval);
     let mut meme_tick = tokio::time::interval(feed_cfg.meme_list_interval);
     let mut gainer_tick = tokio::time::interval(feed_cfg.gainer_loser_interval);
@@ -148,23 +190,26 @@ pub async fn run_feeds(
         "Feed loop starting"
     );
 
+    let use_std = feed_cfg.use_standard_api;
+
     loop {
+        if seen.len() > MAX_SEEN {
+            seen.clear();
+            info!(chain = %platform.chain_name, "Cleared seen set (exceeded {})", MAX_SEEN);
+        }
         tokio::select! {
             _ = new_tick.tick() => {
-                match client.dex_new_list(
-                    &platform.platform_ids_str,
-                    feed_cfg.min_liquidity_usd,
-                    feed_cfg.max_age_minutes,
-                ).await {
-                    Ok(entries) => {
-                        let mut new_count = 0;
-                        for entry in &entries {
-                            if let Some(addr) = &entry.addr {
-                                let key = addr.to_lowercase();
-                                if seen.insert(key) {
-                                    if let Some(token) = leaderboard_to_token(entry, "cmc_new") {
+                if use_std {
+                    match client.listings_newest(100, 10_000.0).await {
+                        Ok(entries) => {
+                            let mut new_count = 0;
+                            for entry in &entries {
+                                if let Some(token) = listing_to_token(entry, &platform.chain_name, "cmc_new") {
+                                    let key = token.address.to_lowercase();
+                                    if seen.insert(key) {
+                                        let addr = token.address.clone();
                                         let _ = tx.send(FeedCandidate {
-                                            address: addr.clone(),
+                                            address: addr,
                                             source: "cmc_new".to_string(),
                                             token: Some(token),
                                         }).await;
@@ -172,55 +217,91 @@ pub async fn run_feeds(
                                     }
                                 }
                             }
+                            if new_count > 0 {
+                                info!(chain = %platform.chain_name, total = entries.len(),
+                                    new = new_count, "New token feed (standard API)");
+                            }
                         }
-                        if new_count > 0 {
-                            info!(chain = %platform.chain_name, total = entries.len(),
-                                new = new_count, "New token feed");
-                        }
+                        Err(e) => warn!(chain = %platform.chain_name, error = %e, "New token feed failed"),
                     }
-                    Err(e) => warn!(chain = %platform.chain_name, error = %e, "New token feed failed"),
+                } else {
+                    match client.dex_new_list(
+                        &platform.platform_ids_str,
+                        feed_cfg.min_liquidity_usd,
+                        feed_cfg.max_age_minutes,
+                    ).await {
+                        Ok(entries) => {
+                            let mut new_count = 0;
+                            for entry in &entries {
+                                if let Some(addr) = &entry.addr {
+                                    let key = addr.to_lowercase();
+                                    if seen.insert(key) {
+                                        if let Some(token) = leaderboard_to_token(entry, "cmc_new") {
+                                            let _ = tx.send(FeedCandidate {
+                                                address: addr.clone(),
+                                                source: "cmc_new".to_string(),
+                                                token: Some(token),
+                                            }).await;
+                                            new_count += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            if new_count > 0 {
+                                info!(chain = %platform.chain_name, total = entries.len(),
+                                    new = new_count, "New token feed");
+                            }
+                        }
+                        Err(e) => warn!(chain = %platform.chain_name, error = %e, "New token feed failed"),
+                    }
                 }
             }
 
             _ = meme_tick.tick() => {
-                match client.dex_meme_list(platform.platform_id).await {
-                    Ok(entries) => {
-                        let mut new_count = 0;
-                        for entry in &entries {
-                            if let Some(addr) = &entry.addr {
-                                let key = addr.to_lowercase();
-                                if seen.insert(key) {
-                                    if let Some(token) = meme_to_token(entry, "cmc_meme") {
-                                        let _ = tx.send(FeedCandidate {
-                                            address: addr.clone(),
-                                            source: "cmc_meme".to_string(),
-                                            token: Some(token),
-                                        }).await;
-                                        new_count += 1;
+                if use_std {
+                    // Standard API doesn't have a meme-specific endpoint;
+                    // skip this tick (gainers catch volatile memecoins)
+                } else {
+                    match client.dex_meme_list(platform.platform_id).await {
+                        Ok(entries) => {
+                            let mut new_count = 0;
+                            for entry in &entries {
+                                if let Some(addr) = &entry.addr {
+                                    let key = addr.to_lowercase();
+                                    if seen.insert(key) {
+                                        if let Some(token) = meme_to_token(entry, "cmc_meme") {
+                                            let _ = tx.send(FeedCandidate {
+                                                address: addr.clone(),
+                                                source: "cmc_meme".to_string(),
+                                                token: Some(token),
+                                            }).await;
+                                            new_count += 1;
+                                        }
                                     }
                                 }
                             }
+                            if new_count > 0 {
+                                info!(chain = %platform.chain_name, total = entries.len(),
+                                    new = new_count, "Meme token feed");
+                            }
                         }
-                        if new_count > 0 {
-                            info!(chain = %platform.chain_name, total = entries.len(),
-                                new = new_count, "Meme token feed");
-                        }
+                        Err(e) => warn!(chain = %platform.chain_name, error = %e, "Meme feed failed"),
                     }
-                    Err(e) => warn!(chain = %platform.chain_name, error = %e, "Meme feed failed"),
                 }
             }
 
             _ = gainer_tick.tick() => {
-                match client.dex_gainer_loser_list(&platform.platform_ids_str).await {
-                    Ok(entries) => {
-                        let mut new_count = 0;
-                        for entry in &entries {
-                            if let Some(addr) = &entry.addr {
-                                let key = addr.to_lowercase();
-                                if seen.insert(key) {
-                                    if let Some(token) = leaderboard_to_token(entry, "cmc_gainer") {
+                if use_std {
+                    match client.listings_gainers(100, 10_000.0).await {
+                        Ok(entries) => {
+                            let mut new_count = 0;
+                            for entry in &entries {
+                                if let Some(token) = listing_to_token(entry, &platform.chain_name, "cmc_gainer") {
+                                    let key = token.address.to_lowercase();
+                                    if seen.insert(key) {
+                                        let addr = token.address.clone();
                                         let _ = tx.send(FeedCandidate {
-                                            address: addr.clone(),
+                                            address: addr,
                                             source: "cmc_gainer".to_string(),
                                             token: Some(token),
                                         }).await;
@@ -228,13 +309,39 @@ pub async fn run_feeds(
                                     }
                                 }
                             }
+                            if new_count > 0 {
+                                info!(chain = %platform.chain_name, total = entries.len(),
+                                    new = new_count, "Gainer feed (standard API)");
+                            }
                         }
-                        if new_count > 0 {
-                            info!(chain = %platform.chain_name, total = entries.len(),
-                                new = new_count, "Gainer/loser feed");
-                        }
+                        Err(e) => warn!(chain = %platform.chain_name, error = %e, "Gainer feed failed"),
                     }
-                    Err(e) => warn!(chain = %platform.chain_name, error = %e, "Gainer feed failed"),
+                } else {
+                    match client.dex_gainer_loser_list(&platform.platform_ids_str).await {
+                        Ok(entries) => {
+                            let mut new_count = 0;
+                            for entry in &entries {
+                                if let Some(addr) = &entry.addr {
+                                    let key = addr.to_lowercase();
+                                    if seen.insert(key) {
+                                        if let Some(token) = leaderboard_to_token(entry, "cmc_gainer") {
+                                            let _ = tx.send(FeedCandidate {
+                                                address: addr.clone(),
+                                                source: "cmc_gainer".to_string(),
+                                                token: Some(token),
+                                            }).await;
+                                            new_count += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            if new_count > 0 {
+                                info!(chain = %platform.chain_name, total = entries.len(),
+                                    new = new_count, "Gainer/loser feed");
+                            }
+                        }
+                        Err(e) => warn!(chain = %platform.chain_name, error = %e, "Gainer feed failed"),
+                    }
                 }
             }
         }

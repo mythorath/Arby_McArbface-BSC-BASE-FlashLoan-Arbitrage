@@ -14,7 +14,7 @@ members = [
 
 [workspace.dependencies]
 alloy = { version = "1", features = ["full", "signer-local"] }
-alloy-primitives = "1"
+alloy-primitives = { version = "1", features = ["serde"] }
 alloy-sol-types = "1"
 alloy-provider = { version = "1", features = ["ws"] }
 alloy-transport-ws = "1"

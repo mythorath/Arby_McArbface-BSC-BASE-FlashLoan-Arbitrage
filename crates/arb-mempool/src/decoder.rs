@@ -223,3 +223,116 @@ impl Default for TxDecoder {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::address;
+
+    fn pad_u256(val: U256) -> [u8; 32] {
+        let bytes: [u8; 32] = val.to_be_bytes();
+        bytes
+    }
+
+    fn pad_addr(addr: Address) -> [u8; 32] {
+        let mut word = [0u8; 32];
+        word[12..32].copy_from_slice(addr.as_slice());
+        word
+    }
+
+    #[test]
+    fn test_decode_known_v2_selector() {
+        let decoder = TxDecoder::new();
+        let selector = [0x38, 0xed, 0x17, 0x39];
+        let token_in = address!("1111111111111111111111111111111111111111");
+        let token_out = address!("2222222222222222222222222222222222222222");
+        let amount_in = U256::from(1000u64);
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&selector);
+        data.extend_from_slice(&pad_u256(amount_in));                // word 0: amountIn
+        data.extend_from_slice(&pad_u256(U256::from(1u64)));         // word 1: amountOutMin
+        data.extend_from_slice(&pad_u256(U256::from(160u64)));       // word 2: path offset = 5*32
+        data.extend_from_slice(&pad_addr(Address::ZERO));            // word 3: to
+        data.extend_from_slice(&pad_u256(U256::from(9999999u64)));   // word 4: deadline
+        data.extend_from_slice(&pad_u256(U256::from(2u64)));         // word 5: path length
+        data.extend_from_slice(&pad_addr(token_in));                 // word 6: path[0]
+        data.extend_from_slice(&pad_addr(token_out));                // word 7: path[1]
+
+        let decoded = decoder.decode(Address::ZERO, &data).unwrap();
+        assert_eq!(decoded.router, "UniV2_swapExactTokensForTokens");
+        assert_eq!(decoded.token_in, Some(token_in));
+        assert_eq!(decoded.token_out, Some(token_out));
+        assert_eq!(decoded.amount_in, Some(amount_in));
+    }
+
+    #[test]
+    fn test_decode_unknown_selector() {
+        let decoder = TxDecoder::new();
+        let input = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00];
+        assert!(decoder.decode(Address::ZERO, &input).is_none());
+    }
+
+    #[test]
+    fn test_decode_too_short() {
+        let decoder = TxDecoder::new();
+        assert!(decoder.decode(Address::ZERO, &[0x38, 0xed]).is_none());
+        assert!(decoder.decode(Address::ZERO, &[]).is_none());
+    }
+
+    #[test]
+    fn test_decode_v3_selector() {
+        let decoder = TxDecoder::new();
+        let selector = [0x41, 0x4b, 0xf3, 0x89];
+        let token_in = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let token_out = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let amount_in = U256::from(5000u64);
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&selector);
+        data.extend_from_slice(&pad_u256(U256::from(32u64)));  // word 0: offset to struct = 32
+        data.extend_from_slice(&pad_addr(token_in));           // word 1: tokenIn
+        data.extend_from_slice(&pad_addr(token_out));          // word 2: tokenOut
+        data.extend_from_slice(&pad_u256(U256::from(3000u64)));// word 3: fee
+        data.extend_from_slice(&pad_addr(Address::ZERO));      // word 4: recipient
+        data.extend_from_slice(&pad_u256(amount_in));          // word 5: amountIn
+        data.extend_from_slice(&pad_u256(U256::from(1u64)));   // word 6: amountOutMin
+        data.extend_from_slice(&pad_u256(U256::ZERO));         // word 7: sqrtPriceLimitX96
+
+        let decoded = decoder.decode(Address::ZERO, &data).unwrap();
+        assert_eq!(decoded.router, "UniV3_exactInputSingle");
+        assert_eq!(decoded.token_in, Some(token_in));
+        assert_eq!(decoded.token_out, Some(token_out));
+        assert_eq!(decoded.amount_in, Some(amount_in));
+    }
+
+    #[test]
+    fn test_read_u256_basic() {
+        let val = U256::from(42u64);
+        let buf = pad_u256(val);
+        let mut data = vec![0u8; 32];
+        data.extend_from_slice(&buf);
+        assert_eq!(read_u256(&data, 0), Some(U256::ZERO));
+        assert_eq!(read_u256(&data, 1), Some(val));
+        assert_eq!(read_u256(&data, 2), None);
+    }
+
+    #[test]
+    fn test_read_addr_basic() {
+        let addr = address!("1234567890abcdef1234567890abcdef12345678");
+        let buf = pad_addr(addr);
+        let result = read_addr(&buf, 0).unwrap();
+        assert_eq!(result, addr);
+    }
+
+    #[test]
+    fn test_decoder_default() {
+        let d1 = TxDecoder::new();
+        let d2 = TxDecoder::default();
+        assert_eq!(d1.known_selectors.len(), d2.known_selectors.len());
+        for (a, b) in d1.known_selectors.iter().zip(d2.known_selectors.iter()) {
+            assert_eq!(a.0, b.0);
+            assert_eq!(a.1, b.1);
+        }
+    }
+}

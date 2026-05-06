@@ -264,6 +264,33 @@ pub struct EvmDisplay {
     pub unverified_contract_status: Option<String>,
 }
 
+// ---------- Standard API types ----------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingEntry {
+    pub id: Option<i64>,
+    pub name: Option<String>,
+    pub symbol: Option<String>,
+    pub platform: Option<ListingPlatform>,
+    pub quote: Option<std::collections::HashMap<String, ListingQuote>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingPlatform {
+    pub id: Option<i64>,
+    pub name: Option<String>,
+    pub symbol: Option<String>,
+    pub token_address: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingQuote {
+    pub price: Option<f64>,
+    pub volume_24h: Option<f64>,
+    pub percent_change_24h: Option<f64>,
+    pub market_cap: Option<f64>,
+}
+
 // ---------- Client ----------
 
 pub struct CmcClient {
@@ -482,5 +509,235 @@ impl CmcClient {
 
     pub async fn dex_platform_list(&self) -> Result<serde_json::Value> {
         self.get("/v1/dex/platform/list").await
+    }
+
+    // ---- Standard API endpoints (available on Hobbyist tier) ----
+
+    pub async fn listings_newest(
+        &self,
+        limit: u32,
+        volume_min: f64,
+    ) -> Result<Vec<ListingEntry>> {
+        let path = format!(
+            "/v1/cryptocurrency/listings/latest?limit={}&sort=date_added&sort_dir=desc&cryptocurrency_type=tokens&volume_24h_min={}&convert=USD",
+            limit, volume_min,
+        );
+        let resp: CmcResponse<Vec<ListingEntry>> = self.get(&path).await?;
+        Ok(resp.data.unwrap_or_default())
+    }
+
+    pub async fn listings_gainers(
+        &self,
+        limit: u32,
+        volume_min: f64,
+    ) -> Result<Vec<ListingEntry>> {
+        let path = format!(
+            "/v1/cryptocurrency/listings/latest?limit={}&sort=percent_change_24h&sort_dir=desc&cryptocurrency_type=tokens&volume_24h_min={}&convert=USD",
+            limit, volume_min,
+        );
+        let resp: CmcResponse<Vec<ListingEntry>> = self.get(&path).await?;
+        Ok(resp.data.unwrap_or_default())
+    }
+
+    pub async fn key_info(&self) -> Result<serde_json::Value> {
+        self.get("/v1/key/info").await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credit_accountant_can_spend_under_budget() {
+        let acc = CreditAccountant::new(100.0);
+        assert!(acc.can_spend());
+    }
+
+    #[test]
+    fn credit_accountant_can_spend_over_budget() {
+        let acc = CreditAccountant::new(10.0);
+        acc.record(10.01);
+        assert!(!acc.can_spend());
+    }
+
+    #[test]
+    fn credit_accountant_record_accumulates() {
+        let acc = CreditAccountant::new(1000.0);
+        acc.record(3.5);
+        acc.record(2.25);
+        acc.record(4.25);
+        assert!((acc.total() - 10.0).abs() < 0.02);
+    }
+
+    #[test]
+    fn credit_accountant_total_initially_zero() {
+        let acc = CreditAccountant::new(50.0);
+        assert_eq!(acc.total(), 0.0);
+    }
+
+    #[test]
+    fn deser_token_leaderboard_all_fields() {
+        let json = r#"{
+            "n": "TestToken",
+            "sym": "TT",
+            "addr": "0xabc",
+            "plt": "ethereum",
+            "pid": 1,
+            "pcid": 2,
+            "fdv": "1000000",
+            "mcap": "500000",
+            "liqUsd": "250000",
+            "p": "1.23",
+            "v24h": "100000",
+            "ch24h": "5.5",
+            "thr": "0.1",
+            "dec": 18,
+            "rl": "low",
+            "hld": 500,
+            "hcnt": 1000,
+            "tsrc": "cmc"
+        }"#;
+        let entry: TokenLeaderboardEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.n.as_deref(), Some("TestToken"));
+        assert_eq!(entry.sym.as_deref(), Some("TT"));
+        assert_eq!(entry.addr.as_deref(), Some("0xabc"));
+        assert_eq!(entry.pid, Some(1));
+        assert_eq!(entry.dec, Some(18));
+        assert_eq!(entry.hld, Some(500));
+        assert_eq!(entry.liq_usd.as_deref(), Some("250000"));
+    }
+
+    #[test]
+    fn deser_token_leaderboard_missing_optional_fields() {
+        let json = r#"{"n": "Minimal"}"#;
+        let entry: TokenLeaderboardEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.n.as_deref(), Some("Minimal"));
+        assert!(entry.sym.is_none());
+        assert!(entry.addr.is_none());
+        assert!(entry.pid.is_none());
+        assert!(entry.dec.is_none());
+        assert!(entry.liq_usd.is_none());
+        assert!(entry.v24h.is_none());
+    }
+
+    #[test]
+    fn deser_meme_token_entry() {
+        let json = r#"{
+            "addr": "0xmeme",
+            "n": "MemeCoin",
+            "sym": "MEME",
+            "dec": 9,
+            "mcap": 42000.0,
+            "liq": "15000",
+            "vu": null,
+            "p": "0.001",
+            "htp": 0.15,
+            "h": 300,
+            "plt": 1,
+            "pn": "pump.fun"
+        }"#;
+        let entry: MemeTokenEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.addr.as_deref(), Some("0xmeme"));
+        assert_eq!(entry.sym.as_deref(), Some("MEME"));
+        assert_eq!(entry.dec, Some(9));
+        assert_eq!(entry.htp, Some(0.15));
+        assert_eq!(entry.h, Some(300));
+        assert_eq!(entry.plt, Some(1));
+    }
+
+    #[test]
+    fn deser_security_response() {
+        let json = r#"{
+            "securityLevel": "high_risk",
+            "extra": {
+                "buyTax": "500",
+                "sellTax": "1000",
+                "isFlaggedByVendor": true,
+                "isVerified": false,
+                "isReported": true
+            },
+            "exist": true,
+            "evmDisplay": {
+                "honeypotStatus": "yes",
+                "unverifiedContractStatus": "unverified"
+            }
+        }"#;
+        let resp: SecurityResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.security_level.as_deref(), Some("high_risk"));
+        assert_eq!(resp.exist, Some(true));
+
+        let extra = resp.extra.unwrap();
+        assert_eq!(extra.buy_tax.as_deref(), Some("500"));
+        assert_eq!(extra.sell_tax.as_deref(), Some("1000"));
+        assert_eq!(extra.is_flagged_by_vendor, Some(true));
+
+        let evm = resp.evm_display.unwrap();
+        assert_eq!(evm.honeypot_status.as_deref(), Some("yes"));
+    }
+
+    #[test]
+    fn deser_meme_result_list_single() {
+        let json = r#"{"addr": "0xsingle", "n": "One"}"#;
+        let result: MemeResultList = serde_json::from_str(json).unwrap();
+        match result {
+            MemeResultList::Single(entry) => {
+                assert_eq!(entry.addr.as_deref(), Some("0xsingle"));
+            }
+            MemeResultList::List(_) => panic!("expected Single variant"),
+        }
+    }
+
+    #[test]
+    fn deser_meme_result_list_vec() {
+        let json = r#"[
+            {"addr": "0xa", "n": "A"},
+            {"addr": "0xb", "n": "B"}
+        ]"#;
+        let result: MemeResultList = serde_json::from_str(json).unwrap();
+        match result {
+            MemeResultList::List(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].addr.as_deref(), Some("0xa"));
+                assert_eq!(entries[1].addr.as_deref(), Some("0xb"));
+            }
+            MemeResultList::Single(_) => panic!("expected List variant"),
+        }
+    }
+
+    #[test]
+    fn deser_pool_entry_with_tokens() {
+        let json = r#"{
+            "addr": "0xpool",
+            "v24": "50000",
+            "liqUsd": "100000",
+            "exn": "uniswap_v3",
+            "fa": "0xfactory",
+            "lr": "0.5",
+            "br": "0.1",
+            "t0": {
+                "addr": "0xweth",
+                "sym": "WETH",
+                "n": "Wrapped Ether",
+                "liqUsd": "50000"
+            },
+            "t1": {
+                "addr": "0xusdc",
+                "sym": "USDC",
+                "n": "USD Coin",
+                "liqUsd": "50000"
+            }
+        }"#;
+        let pool: PoolEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(pool.addr.as_deref(), Some("0xpool"));
+        assert_eq!(pool.liq_usd.as_deref(), Some("100000"));
+        assert_eq!(pool.exn.as_deref(), Some("uniswap_v3"));
+
+        let t0 = pool.t0.unwrap();
+        assert_eq!(t0.sym.as_deref(), Some("WETH"));
+        assert_eq!(t0.liq_usd.as_deref(), Some("50000"));
+
+        let t1 = pool.t1.unwrap();
+        assert_eq!(t1.sym.as_deref(), Some("USDC"));
     }
 }

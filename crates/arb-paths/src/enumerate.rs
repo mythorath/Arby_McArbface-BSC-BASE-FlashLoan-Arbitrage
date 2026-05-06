@@ -206,6 +206,9 @@ impl PathEnumerator {
             used_pools.remove(&pool_idx);
             if next_token != flash_token {
                 visited_tokens.remove(&next_token);
+                if let Some(c) = token_counts.get_mut(&next_token) {
+                    *c = c.saturating_sub(1);
+                }
             }
         }
     }
@@ -260,6 +263,161 @@ mod tests {
         assert!(!paths.is_empty());
         for path in &paths {
             assert!(path.is_valid());
+        }
+    }
+
+    #[test]
+    fn test_enumerate_respects_max_hops() {
+        let pools = vec![
+            PoolInfo { address: addr(10), protocol: Protocol::UniswapV2, token0: addr(1), token1: addr(2) },
+            PoolInfo { address: addr(11), protocol: Protocol::UniswapV2, token0: addr(2), token1: addr(3) },
+            PoolInfo { address: addr(12), protocol: Protocol::UniswapV2, token0: addr(3), token1: addr(4) },
+            PoolInfo { address: addr(13), protocol: Protocol::UniswapV2, token0: addr(4), token1: addr(5) },
+            PoolInfo { address: addr(14), protocol: Protocol::UniswapV2, token0: addr(5), token1: addr(1) },
+        ];
+
+        let mut amounts = HashMap::new();
+        amounts.insert(addr(1), U256::from(1_000_000u64));
+
+        let enumerator = PathEnumerator::new(pools, vec![addr(1)], amounts)
+            .with_limits(3, 25000, 200);
+        let paths = enumerator.enumerate();
+
+        assert!(
+            paths.iter().all(|p| p.num_hops() <= 3),
+            "no path should exceed max_hops=3"
+        );
+        assert!(
+            !paths.iter().any(|p| p.num_hops() == 5),
+            "the 5-hop cycle must not appear"
+        );
+    }
+
+    #[test]
+    fn test_enumerate_two_hop() {
+        let pools = vec![
+            PoolInfo { address: addr(10), protocol: Protocol::UniswapV2, token0: addr(1), token1: addr(2) },
+            PoolInfo { address: addr(11), protocol: Protocol::UniswapV2, token0: addr(1), token1: addr(2) },
+        ];
+
+        let mut amounts = HashMap::new();
+        amounts.insert(addr(1), U256::from(1_000_000u64));
+
+        let enumerator = PathEnumerator::new(pools, vec![addr(1)], amounts);
+        let paths = enumerator.enumerate();
+
+        let two_hop: Vec<_> = paths.iter().filter(|p| p.num_hops() == 2).collect();
+        assert_eq!(two_hop.len(), 2, "two distinct 2-hop A→B→A cycles (one per pool ordering)");
+        for p in &two_hop {
+            assert!(p.is_valid());
+        }
+    }
+
+    #[test]
+    fn test_enumerate_no_cycle() {
+        let pools = vec![
+            PoolInfo { address: addr(10), protocol: Protocol::UniswapV2, token0: addr(1), token1: addr(2) },
+            PoolInfo { address: addr(11), protocol: Protocol::UniswapV2, token0: addr(2), token1: addr(3) },
+        ];
+
+        let mut amounts = HashMap::new();
+        amounts.insert(addr(1), U256::from(1_000_000u64));
+
+        let enumerator = PathEnumerator::new(pools, vec![addr(1)], amounts);
+        let paths = enumerator.enumerate();
+
+        assert!(paths.is_empty(), "no cycle back to flash token should exist");
+    }
+
+    #[test]
+    fn test_enumerate_max_paths_per_flash_token() {
+        let pools = vec![
+            PoolInfo { address: addr(10), protocol: Protocol::UniswapV2, token0: addr(1), token1: addr(2) },
+            PoolInfo { address: addr(11), protocol: Protocol::UniswapV3, token0: addr(1), token1: addr(2) },
+            PoolInfo { address: addr(12), protocol: Protocol::UniswapV2, token0: addr(2), token1: addr(3) },
+            PoolInfo { address: addr(13), protocol: Protocol::UniswapV3, token0: addr(2), token1: addr(3) },
+            PoolInfo { address: addr(14), protocol: Protocol::UniswapV2, token0: addr(1), token1: addr(3) },
+            PoolInfo { address: addr(15), protocol: Protocol::UniswapV3, token0: addr(1), token1: addr(3) },
+        ];
+
+        let mut amounts = HashMap::new();
+        amounts.insert(addr(1), U256::from(1_000_000u64));
+
+        let enumerator = PathEnumerator::new(pools, vec![addr(1)], amounts)
+            .with_limits(4, 2, 200);
+        let paths = enumerator.enumerate();
+
+        assert!(paths.len() <= 2, "max_paths_per_flash_token=2 must be respected, got {}", paths.len());
+    }
+
+    #[test]
+    fn test_enumerate_skips_v4_pools() {
+        let pools = vec![
+            PoolInfo { address: addr(10), protocol: Protocol::UniswapV2, token0: addr(1), token1: addr(2) },
+            PoolInfo { address: addr(11), protocol: Protocol::UniswapV4, token0: addr(2), token1: addr(3) },
+            PoolInfo { address: addr(12), protocol: Protocol::UniswapV2, token0: addr(1), token1: addr(3) },
+        ];
+
+        let mut amounts = HashMap::new();
+        amounts.insert(addr(1), U256::from(1_000_000u64));
+
+        let enumerator = PathEnumerator::new(pools, vec![addr(1)], amounts);
+        let paths = enumerator.enumerate();
+
+        for path in &paths {
+            for hop in &path.hops {
+                assert_ne!(hop.protocol, Protocol::UniswapV4, "V4 pools must be skipped");
+            }
+        }
+        assert!(
+            !paths.iter().any(|p| p.num_hops() == 3),
+            "the 3-hop triangle through V4 should not exist"
+        );
+    }
+
+    #[test]
+    fn test_enumerate_four_hop() {
+        let pools = vec![
+            PoolInfo { address: addr(10), protocol: Protocol::UniswapV2, token0: addr(1), token1: addr(2) },
+            PoolInfo { address: addr(11), protocol: Protocol::UniswapV2, token0: addr(2), token1: addr(3) },
+            PoolInfo { address: addr(12), protocol: Protocol::UniswapV2, token0: addr(3), token1: addr(4) },
+            PoolInfo { address: addr(13), protocol: Protocol::UniswapV2, token0: addr(4), token1: addr(1) },
+        ];
+
+        let mut amounts = HashMap::new();
+        amounts.insert(addr(1), U256::from(1_000_000u64));
+
+        let enumerator = PathEnumerator::new(pools, vec![addr(1)], amounts);
+        let paths = enumerator.enumerate();
+
+        let four_hop: Vec<_> = paths.iter().filter(|p| p.num_hops() == 4).collect();
+        assert!(!four_hop.is_empty(), "a 4-hop path should be found with default max_hops=4");
+        assert!(four_hop[0].is_valid());
+    }
+
+    #[test]
+    fn test_all_paths_valid() {
+        let pools = vec![
+            PoolInfo { address: addr(10), protocol: Protocol::UniswapV2, token0: addr(1), token1: addr(2) },
+            PoolInfo { address: addr(11), protocol: Protocol::UniswapV3, token0: addr(2), token1: addr(3) },
+            PoolInfo { address: addr(12), protocol: Protocol::UniswapV2, token0: addr(3), token1: addr(1) },
+            PoolInfo { address: addr(13), protocol: Protocol::UniswapV3, token0: addr(1), token1: addr(3) },
+            PoolInfo { address: addr(14), protocol: Protocol::UniswapV2, token0: addr(2), token1: addr(4) },
+            PoolInfo { address: addr(15), protocol: Protocol::UniswapV3, token0: addr(4), token1: addr(1) },
+        ];
+
+        let mut amounts = HashMap::new();
+        amounts.insert(addr(1), U256::from(1_000_000u64));
+
+        let enumerator = PathEnumerator::new(pools, vec![addr(1)], amounts);
+        let paths = enumerator.enumerate();
+
+        assert!(!paths.is_empty(), "should find at least one path");
+        for path in &paths {
+            assert!(path.is_valid(), "path {} failed is_valid()", path.id);
+            assert_eq!(path.flash_token, addr(1));
+            assert_eq!(path.hops.first().unwrap().token_in, addr(1));
+            assert_eq!(path.hops.last().unwrap().token_out, addr(1));
         }
     }
 }

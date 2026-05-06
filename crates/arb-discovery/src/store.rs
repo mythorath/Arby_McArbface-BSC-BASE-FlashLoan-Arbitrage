@@ -155,6 +155,10 @@ impl DiscoveryStore {
 
     pub fn add_to_blacklist(&self, chain: &str, address: &str, reason: &str) -> Result<()> {
         let mut blacklist = self.load_blacklist(chain)?;
+        let addr_lower = address.to_lowercase();
+        if blacklist.addresses.iter().any(|e| e.address.to_lowercase() == addr_lower) {
+            return Ok(());
+        }
         let entry = BlacklistEntry {
             address: address.to_string(),
             reason: reason.to_string(),
@@ -199,5 +203,164 @@ impl DiscoveryStore {
         std::fs::write(&tmp_path, &data)?;
         std::fs::rename(&tmp_path, &path)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_store() -> (tempfile::TempDir, DiscoveryStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DiscoveryStore::new(dir.path());
+        (dir, store)
+    }
+
+    fn sample_pool(addr: &str) -> DiscoveredPool {
+        DiscoveredPool {
+            address: addr.to_string(),
+            protocol: "uniswap_v3".into(),
+            token0: "0xweth".into(),
+            token1: "0xusdc".into(),
+            fee_bps: 30,
+            exchange_name: "Uniswap V3".into(),
+            liquidity_usd: 100_000.0,
+            volume_24h_usd: 50_000.0,
+            factory_address: "0xfactory".into(),
+            locked_lp_rate: 0.0,
+            burned_lp_rate: 0.0,
+            last_seen: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    fn sample_token(addr: &str) -> DiscoveredToken {
+        DiscoveredToken {
+            address: addr.to_string(),
+            symbol: "TEST".into(),
+            name: "Test Token".into(),
+            decimals: 18,
+            price_usd: 1.0,
+            market_cap_usd: 1_000_000.0,
+            liquidity_usd: 200_000.0,
+            volume_24h_usd: 80_000.0,
+            security_level: "low_risk".into(),
+            honeypot_status: "no".into(),
+            buy_tax_bps: 0,
+            sell_tax_bps: 0,
+            is_flagged: false,
+            holder_count: 5000,
+            top_holder_rate: 0.05,
+            source: "cmc".into(),
+            first_seen: "2026-01-01T00:00:00Z".into(),
+            last_seen: "2026-01-01T00:00:00Z".into(),
+            platform_id: 1,
+        }
+    }
+
+    #[test]
+    fn new_store_with_temp_dir() {
+        let (dir, store) = make_store();
+        assert_eq!(store.base_dir, dir.path());
+    }
+
+    #[test]
+    fn save_and_load_pools_roundtrip() {
+        let (_dir, store) = make_store();
+        let universe = PoolUniverse {
+            chain: "ethereum".into(),
+            pools: vec![sample_pool("0xpool1"), sample_pool("0xpool2")],
+            last_updated: "2026-01-01T00:00:00Z".into(),
+        };
+
+        store.save_pools("ethereum", &universe).unwrap();
+        let loaded = store.load_pools("ethereum").unwrap();
+
+        assert_eq!(loaded.chain, "ethereum");
+        assert_eq!(loaded.pools.len(), 2);
+        assert_eq!(loaded.pools[0].address, "0xpool1");
+        assert_eq!(loaded.pools[1].address, "0xpool2");
+        assert_eq!(loaded.pools[0].fee_bps, 30);
+    }
+
+    #[test]
+    fn load_pools_missing_file_returns_empty() {
+        let (_dir, store) = make_store();
+        let loaded = store.load_pools("base").unwrap();
+        assert_eq!(loaded.chain, "base");
+        assert!(loaded.pools.is_empty());
+    }
+
+    #[test]
+    fn save_and_load_tokens_roundtrip() {
+        let (_dir, store) = make_store();
+        let universe = TokenUniverse {
+            chain: "ethereum".into(),
+            tokens: vec![sample_token("0xaaa"), sample_token("0xbbb")],
+            last_updated: "2026-01-01T00:00:00Z".into(),
+        };
+
+        store.save_tokens("ethereum", &universe).unwrap();
+        let loaded = store.load_tokens("ethereum").unwrap();
+
+        assert_eq!(loaded.chain, "ethereum");
+        assert_eq!(loaded.tokens.len(), 2);
+        assert_eq!(loaded.tokens[0].address, "0xaaa");
+        assert_eq!(loaded.tokens[1].symbol, "TEST");
+    }
+
+    #[test]
+    fn blacklist_add_and_check_case_insensitive() {
+        let (_dir, store) = make_store();
+        store
+            .add_to_blacklist("ethereum", "0xAbCdEf", "scam")
+            .unwrap();
+
+        assert!(store.is_blacklisted("ethereum", "0xabcdef").unwrap());
+        assert!(store.is_blacklisted("ethereum", "0xABCDEF").unwrap());
+        assert!(store.is_blacklisted("ethereum", "0xAbCdEf").unwrap());
+    }
+
+    #[test]
+    fn is_blacklisted_returns_false_for_unknown() {
+        let (_dir, store) = make_store();
+        assert!(!store.is_blacklisted("ethereum", "0xnothere").unwrap());
+    }
+
+    #[test]
+    fn save_and_load_credits_roundtrip() {
+        let (_dir, store) = make_store();
+        let ledger = CreditLedger {
+            monthly_spend: 42.5,
+            daily_spend: 3.0,
+            last_reset_month: "2026-01".into(),
+            last_reset_day: "2026-01-15".into(),
+            total_requests: 100,
+        };
+
+        store.save_credits(&ledger).unwrap();
+        let loaded = store.load_credits().unwrap();
+
+        assert_eq!(loaded.monthly_spend, 42.5);
+        assert_eq!(loaded.daily_spend, 3.0);
+        assert_eq!(loaded.last_reset_month, "2026-01");
+        assert_eq!(loaded.total_requests, 100);
+    }
+
+    #[test]
+    fn atomic_write_tmp_file_does_not_persist() {
+        let (dir, store) = make_store();
+        let universe = PoolUniverse {
+            chain: "ethereum".into(),
+            pools: vec![sample_pool("0x1")],
+            last_updated: "2026-01-01T00:00:00Z".into(),
+        };
+
+        store.save_pools("ethereum", &universe).unwrap();
+
+        let tmp_path = dir.path().join("pool_universe.ethereum.json.tmp");
+        assert!(!tmp_path.exists());
+
+        let final_path = dir.path().join("pool_universe.ethereum.json");
+        assert!(final_path.exists());
     }
 }

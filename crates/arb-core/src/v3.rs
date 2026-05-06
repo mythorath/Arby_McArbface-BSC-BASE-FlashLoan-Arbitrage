@@ -276,4 +276,75 @@ mod tests {
         let pool = make_pool(Q96, 0, 3000);
         assert!(pool.quote(pool.token0, U256::from(1000u64)).is_err());
     }
+
+    #[test]
+    fn test_multi_tick_small_swap_no_haircut() {
+        let liq = 1_000_000_000_000_000u128;
+        let fee = 3000u32;
+        let amount = U256::from(1_000u64);
+
+        let single = quote_single_tick(amount, Q96, liq, fee, true).unwrap();
+        let multi = quote_multi_tick_approx(amount, Q96, liq, fee, true).unwrap();
+
+        assert_eq!(single, multi, "small swap should produce identical output");
+    }
+
+    #[test]
+    fn test_multi_tick_large_swap_has_haircut() {
+        let liq = 1_000_000u128;
+        let fee = 3000u32;
+        let amount = U256::from(500_000u64);
+
+        let single = quote_single_tick(amount, Q96, liq, fee, true).unwrap();
+        let multi = quote_multi_tick_approx(amount, Q96, liq, fee, true).unwrap();
+
+        assert!(multi < single, "large swap should get haircut: multi={multi}, single={single}");
+        assert!(multi > U256::ZERO, "output should still be positive");
+    }
+
+    #[test]
+    fn test_multi_tick_zero_input() {
+        let result = quote_multi_tick_approx(U256::ZERO, Q96, 1_000_000u128, 3000, true);
+        assert_eq!(result.unwrap(), U256::ZERO);
+    }
+
+    #[test]
+    fn test_multi_tick_zero_liquidity() {
+        let result = quote_multi_tick_approx(U256::from(1000u64), Q96, 0, 3000, false);
+        assert!(result.is_err(), "zero liquidity should return an error");
+    }
+
+    #[test]
+    fn test_multi_tick_one_for_zero_small() {
+        let liq = 1_000_000_000_000_000u128;
+        let fee = 3000u32;
+        let amount = U256::from(1_000u64);
+
+        let single = quote_single_tick(amount, Q96, liq, fee, false).unwrap();
+        let multi = quote_multi_tick_approx(amount, Q96, liq, fee, false).unwrap();
+
+        assert_eq!(single, multi, "small one_for_zero swap should have no haircut");
+    }
+
+    #[test]
+    fn test_multi_tick_one_for_zero_large() {
+        let liq = 10_000u128;
+        let fee = 3000u32;
+        let amount = U256::from(100_000u64);
+
+        let single = quote_single_tick(amount, Q96, liq, fee, false).unwrap();
+        let multi = quote_multi_tick_approx(amount, Q96, liq, fee, false).unwrap();
+
+        assert!(multi <= single, "large one_for_zero should get haircut or equal");
+    }
+
+    #[test]
+    fn test_tick_to_sqrt_price() {
+        let result = tick_to_sqrt_price_x96(0);
+        let diff = if result > Q96 { result - Q96 } else { Q96 - result };
+        assert!(
+            diff <= U256::from(1u64),
+            "tick 0 should give sqrtPriceX96 ≈ Q96 (2^96), got {result}"
+        );
+    }
 }

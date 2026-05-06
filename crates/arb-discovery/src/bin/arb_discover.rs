@@ -41,6 +41,7 @@ async fn run_chain(
     chain: &str,
     client: Arc<CmcClient>,
     store: Arc<DiscoveryStore>,
+    use_standard_api: bool,
 ) -> Result<()> {
     let platform = match chain {
         "BSC" | "bsc" => PlatformConfig::bsc(),
@@ -67,7 +68,10 @@ async fn run_chain(
         chain_name: platform.chain_name.clone(),
     };
 
-    let feed_cfg = FeedConfig::default();
+    let feed_cfg = FeedConfig {
+        use_standard_api,
+        ..FeedConfig::default()
+    };
     let (tx, mut rx) = mpsc::channel::<FeedCandidate>(500);
 
     let feed_client = client.clone();
@@ -78,9 +82,51 @@ async fn run_chain(
         }
     });
 
-    info!(chain = %chain, "Discovery enrichment loop starting");
+    info!(chain = %chain, mode = if use_standard_api { "standard" } else { "dex" },
+        "Discovery enrichment loop starting");
 
     while let Some(candidate) = rx.recv().await {
+        let chain_lower = chain.to_lowercase();
+
+        if use_standard_api {
+            // Standard API mode: we have the token from listings but no pool/security data.
+            // Save the token directly — the runner will discover pools on-chain.
+            let token = match candidate.token {
+                Some(t) => t,
+                None => continue,
+            };
+
+            if token.volume_24h_usd < filter_cfg.min_volume_usd_24h {
+                continue;
+            }
+
+            let mut token_uni = store.load_tokens(&chain_lower).unwrap_or_default();
+            let existing = token_uni.tokens.iter_mut()
+                .find(|t| t.address.to_lowercase() == token.address.to_lowercase());
+            if let Some(existing) = existing {
+                existing.last_seen = token.last_seen.clone();
+                existing.price_usd = token.price_usd;
+                existing.volume_24h_usd = token.volume_24h_usd;
+            } else {
+                token_uni.tokens.push(token.clone());
+            }
+            token_uni.chain = chain_lower.clone();
+            token_uni.last_updated = chrono::Utc::now().to_rfc3339();
+            if let Err(e) = store.save_tokens(&chain_lower, &token_uni) {
+                warn!(error = %e, "Failed to save token universe");
+            }
+
+            info!(
+                chain = %chain,
+                token = %token.symbol,
+                address = %token.address,
+                volume = token.volume_24h_usd,
+                total_tokens = token_uni.tokens.len(),
+                "Token discovered (standard API)"
+            );
+            continue;
+        }
+
         match enrich::enrich_candidate(&client, &candidate, &enrich_cfg, &store).await {
             Ok(Some((token, pools))) => {
                 let kept_pools = filter_cfg.filter_pools(pools);
@@ -103,9 +149,6 @@ async fn run_chain(
                     continue;
                 }
 
-                let chain_lower = chain.to_lowercase();
-
-                // Merge into existing universes
                 let mut pool_uni = store.load_pools(&chain_lower).unwrap_or_default();
                 for pool in &kept_pools {
                     if !pool_uni.pools.iter().any(|p| p.address == pool.address) {
@@ -174,15 +217,39 @@ async fn main() -> Result<()> {
 
     let client = Arc::new(CmcClient::new(&api_key, 250, 75_000.0)?);
 
-    // Smoke test: verify API key works
     info!("Verifying CMC API key...");
-    match client.dex_platform_list().await {
-        Ok(_) => info!("CMC API key validated — DEX endpoints accessible"),
+    match client.key_info().await {
+        Ok(info_val) => {
+            let plan = info_val.get("data")
+                .and_then(|d| d.get("plan"))
+                .and_then(|p| p.get("credit_limit_monthly"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            info!(monthly_credits = plan, "CMC API key validated");
+        }
         Err(e) => {
-            error!(error = %e, "CMC API key validation failed — DEX endpoints may not be available on this plan");
+            error!(error = %e, "CMC API key validation failed");
             return Err(e);
         }
     }
+
+    // Auto-detect by trying a real DEX data endpoint
+    let use_standard_api = match client.dex_gainer_loser_list("1").await {
+        Ok(_) => {
+            info!("DEX API endpoints accessible — using DEX feeds");
+            false
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            if msg.contains("1006") || msg.contains("doesn't support") {
+                info!("DEX API not on this plan — falling back to standard API feeds");
+                true
+            } else {
+                info!("DEX API probe returned error (may be transient) — using standard API feeds");
+                true
+            }
+        }
+    };
 
     let store = Arc::new(DiscoveryStore::new(Path::new("discovery")));
 
@@ -198,8 +265,9 @@ async fn main() -> Result<()> {
         let c = client.clone();
         let s = store.clone();
         let chain_owned = chain.to_string();
+        let std_api = use_standard_api;
         handles.push(tokio::spawn(async move {
-            if let Err(e) = run_chain(&chain_owned, c, s).await {
+            if let Err(e) = run_chain(&chain_owned, c, s, std_api).await {
                 error!(chain = %chain_owned, error = %e, "Chain discovery failed");
             }
         }));
