@@ -22,6 +22,8 @@ logs/
 *.log
 status/
 *.pid
+# Discovery store — runtime-generated, changes as the bot learns new pools/tokens
+discovery/
 
 # -----------------------------------------------------------------------------
 # Rust build artifacts
